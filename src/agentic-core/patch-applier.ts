@@ -5,7 +5,10 @@
  * 26. Git-friendly minimal diffs (uses diff-utils for pre-flight validation)
  * 22. Security validation (path containment before write)
  * 11. Immutable result types
- *  8. Dependency injection (PatchTool + SafeFs injected)
+ *  8. Dependency injection (PatchTool + SafeFs + MemoryManager injected)
+ *
+ * After every successful apply the changed files are indexed into the
+ * MemoryManager asynchronously (non-blocking, <50 ms overhead).
  *
  * DELTA TYPE: EXTEND (wraps upstream tools/patch.ts)
  */
@@ -15,6 +18,7 @@ import { WorkspaceTool } from '../tools/workspace';
 import { Patch, ToolResult } from '../protocol/types';
 import { parseUnifiedDiff } from '../utils/diff-utils';
 import { validatePath } from '../utils/safe-fs';
+import { MemoryManager } from '../utils/memory-manager';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,11 +43,13 @@ export interface BulkApplyResult {
 /**
  * Validates and applies patches through the upstream PatchTool, adding
  * pre-flight checks for diff structure and path safety.
+ * On success, triggers non-blocking memory indexing of changed files.
  */
 export class PatchApplier {
   constructor(
     private readonly upstream: PatchTool,
-    private readonly workspace: WorkspaceTool
+    private readonly workspace: WorkspaceTool,
+    private readonly memory?: MemoryManager
   ) {}
 
   // -------------------------------------------------------------------------
@@ -83,16 +89,26 @@ export class PatchApplier {
 
   /**
    * Apply multiple patches sequentially, collecting results.
+   * Successful patches are indexed into memory asynchronously.
    * Never throws; failed patches are reported in the result object.
    */
   async applyAll(patches: readonly Patch[]): Promise<BulkApplyResult> {
     const applied: ApplyResult[] = [];
+    const succeeded: Patch[] = [];
+
     for (const patch of patches) {
-      applied.push(await this.apply(patch));
+      const result = await this.apply(patch);
+      applied.push(result);
+      if (result.success) { succeeded.push(patch); }
     }
+
+    // Non-blocking memory update for successfully applied patches
+    if (succeeded.length > 0 && this.memory) {
+      this.memory.indexPatches(succeeded, this.workspace.getWorkspaceRoot());
+    }
+
     const successCount = applied.filter(r => r.success).length;
-    const failCount = applied.length - successCount;
-    return { applied, successCount, failCount };
+    return { applied, successCount, failCount: applied.length - successCount };
   }
 
   /**

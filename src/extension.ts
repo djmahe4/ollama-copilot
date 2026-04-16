@@ -25,6 +25,7 @@ import { SessionState }      from './protocol/types';
 
 // New modules
 import { McpClientManager }  from './utils/mcp-client';
+import { MemoryManager }     from './utils/memory-manager';
 import { ModelManager }      from './ollama/model-manager';
 import { PlanManager }       from './agentic-core/plan-manager';
 import { TaskOrchestrator }  from './agentic-core/task-orchestrator';
@@ -59,6 +60,7 @@ export class OllamaCopilotExtension {
 
   // New fields
   private mcpClient: McpClientManager;
+  private memory: MemoryManager;
   private modelManager: ModelManager;
   private planManager: PlanManager;
   private orchestrator: TaskOrchestrator;
@@ -101,13 +103,19 @@ export class OllamaCopilotExtension {
     // Initialize MCP client manager
     this.mcpClient = new McpClientManager(context);
 
+    // Initialize memory manager and start async load (non-blocking)
+    this.memory = new MemoryManager(context);
+    this.memory.initialize().catch(err =>
+      console.error('[extension] MemoryManager init error:', err)
+    );
+
     // Initialize new agentic-core modules
     const cfg2 = vscode.workspace.getConfiguration('ollamaCopilot');
     const apiUrl2 = cfg2.get<string>('apiUrl') ?? 'http://localhost:11434';
     this.modelManager  = new ModelManager(apiUrl2);
     this.planManager   = new PlanManager(this.ollama, this.workspace);
     this.orchestrator  = new TaskOrchestrator(
-      this.ollama, this.planManager, this.workspace, this.patch
+      this.ollama, this.planManager, this.workspace, this.patch, this.memory
     );
     this.statusBar     = new StatusBarManager(context);
     this.sidebarProvider = new SidebarProvider(context, this.chatView, this.statusBar);
@@ -175,6 +183,7 @@ export class OllamaCopilotExtension {
    */
   public dispose(): void {
     this.mcpClient.dispose();
+    this.memory.dispose();
     this.sidebarProvider.dispose();
   }
 

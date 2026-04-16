@@ -161,6 +161,11 @@
           ],
           "description": "Allowed terminal commands for security"
         },
+        "llamaACoder.embeddingModel": {
+          "type": "string",
+          "default": "nomic-embed-text",
+          "description": "Ollama model used to generate embeddings for the memory store. Must support /api/embeddings (e.g. nomic-embed-text, mxbai-embed-large). Falls back to feature-hashing when not available."
+        },
         "llamaACoder.mcpServers": {
           "type": "array",
           "default": [],

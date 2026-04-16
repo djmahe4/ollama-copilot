@@ -7,6 +7,9 @@
  * 28. Parallel task execution (safe, independent subtasks only)
  *  8. Dependency injection
  *
+ * Before each ReAct step, the MemoryManager is queried to surface relevant
+ * prior code context, giving the model precise line-level information.
+ *
  * DELTA TYPE: EXTEND (new orchestration layer over existing agents)
  */
 
@@ -16,6 +19,7 @@ import { WorkspaceTool } from '../tools/workspace';
 import { PatchTool } from '../tools/patch';
 import { Patch, PlannerOutput } from '../protocol/types';
 import { startSpan, endSpan } from '../utils/optimization-engine';
+import { MemoryManager } from '../utils/memory-manager';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,7 +70,8 @@ export class TaskOrchestrator {
     private readonly ollama: OllamaClient,
     private readonly planManager: PlanManager,
     private readonly workspace: WorkspaceTool,
-    private readonly patchTool: PatchTool
+    private readonly patchTool: PatchTool,
+    private readonly memory?: MemoryManager
   ) {}
 
   // -------------------------------------------------------------------------
@@ -185,6 +190,7 @@ export class TaskOrchestrator {
   /**
    * One ReAct step: reason about the task in context, then produce an
    * observation string summarising what changes would implement the step.
+   * Memory context is retrieved and prepended to the prompt.
    */
   private async reactStep(
     taskDescription: string,
@@ -192,7 +198,13 @@ export class TaskOrchestrator {
   ): Promise<string> {
     await this.respectRateLimit();
 
+    // Retrieve relevant memory context (<100 ms synchronous search)
+    const memContext = this.memory
+      ? this.memory.buildContext(this.memory.search(taskDescription, 4))
+      : '';
+
     const prompt =
+      (memContext ? `${memContext}\n\n` : '') +
       `You are an expert coder. Reason briefly then describe what changes ` +
       `would implement this step:\n\nStep: ${taskDescription}\n\n` +
       `Feature: ${plan.feature}\nFiles in scope: ${plan.files_to_read.join(', ')}`;

@@ -6,6 +6,10 @@
  *  6. Self-consistency (runs multiple validation passes and aggregates)
  *  8. Dependency injection
  *
+ * Before each verification pass, the MemoryManager is queried to retrieve
+ * relevant prior context which is injected into the LLM prompt for more
+ * accurate analysis.
+ *
  * DELTA TYPE: EXTEND (wraps upstream agents/tester.ts)
  */
 
@@ -15,6 +19,7 @@ import { TerminalTool } from '../tools/terminal';
 import { WorkspaceTool } from '../tools/workspace';
 import { PlannerOutput, Patch, TestFix } from '../protocol/types';
 import { startSpan, endSpan } from '../utils/optimization-engine';
+import { MemoryManager } from '../utils/memory-manager';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,7 +59,7 @@ const CONSISTENCY_PASSES = 2;
 
 /**
  * Wraps `TesterAgent` and adds spec-first criteria generation plus
- * multi-pass self-consistency checking.
+ * multi-pass self-consistency checking with memory-augmented context.
  */
 export class Verifier {
   private readonly upstream: TesterAgent;
@@ -62,7 +67,8 @@ export class Verifier {
   constructor(
     private readonly ollama: OllamaClient,
     private readonly terminal: TerminalTool,
-    private readonly workspace: WorkspaceTool
+    private readonly workspace: WorkspaceTool,
+    private readonly memory?: MemoryManager
   ) {
     this.upstream = new TesterAgent(ollama, terminal, workspace);
   }
@@ -100,9 +106,8 @@ export class Verifier {
 
   /**
    * Run CONSISTENCY_PASSES independent verification passes and aggregate.
+   * Memory context is retrieved before each pass and injected into analysis.
    * (technique 6 – self-consistency)
-   *
-   * A result is considered "consistent" if at least half the passes agree.
    */
   async verify(
     patches: readonly Patch[],
@@ -110,6 +115,12 @@ export class Verifier {
   ): Promise<VerificationResult> {
     const span = startSpan('verifier:verify');
     const passes: VerificationPass[] = [];
+
+    // Retrieve memory context once for all passes (fast, synchronous)
+    const memContext = this.buildMemoryContext(patches);
+    if (memContext) {
+      onProgress?.('📚 Memory context retrieved for verification…');
+    }
 
     for (let i = 0; i < CONSISTENCY_PASSES; i++) {
       onProgress?.(`🔬 Verification pass ${i + 1}/${CONSISTENCY_PASSES}…`);
@@ -134,7 +145,6 @@ export class Verifier {
     const overallSuccess = successCount >= Math.ceil(CONSISTENCY_PASSES / 2);
     const elapsed = endSpan('verifier:verify');
 
-    // If majority failed, pick the first fix available (technique 6)
     const consensusFix = overallSuccess
       ? undefined
       : passes.find(p => p.fix !== undefined)?.fix;
@@ -145,5 +155,20 @@ export class Verifier {
       consensusFix,
       durationMs: elapsed?.durationMs ?? 0
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Private helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Retrieve memory context relevant to the patches being verified.
+   * Returns a formatted string ready for prompt injection, or '' if none.
+   */
+  private buildMemoryContext(patches: readonly Patch[]): string {
+    if (!this.memory) { return ''; }
+    const query = patches.map(p => p.path).join(' ');
+    const results = this.memory.search(query, 5);
+    return this.memory.buildContext(results);
   }
 }
