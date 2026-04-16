@@ -88,6 +88,21 @@
         "command": "llama-a-coder.manageMcpServers",
         "title": "Manage MCP Servers",
         "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.codeAction.fix",
+        "title": "Fix with Llama A Coder",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.codeAction.refactor",
+        "title": "Refactor with Llama A Coder",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.codeAction.explain",
+        "title": "Explain with Llama A Coder",
+        "category": "Llama A Coder"
       }
     ],
     "viewsContainers": {

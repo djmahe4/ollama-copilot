@@ -2,30 +2,48 @@
  * Llama A Coder Extension – Main Entry Point
  *
  * Production-grade agentic coding assistant powered by local Ollama models.
- * Fork of ollama-copilot (anandof28) – evolved with MCP server support and
- * enhanced agentic command surface.
+ * Fork of ollama-copilot (anandof28) – evolved with full agentic-core,
+ * MCP server support, optimization engine, and enhanced command surface.
  *
- * DELTA TYPE: MODIFY (metadata + new commands + MCP init; upstream logic preserved)
+ * DELTA TYPE: MODIFY (all upstream logic preserved; new modules wired in)
  */
 
 import * as vscode from 'vscode';
-import { OllamaClient } from './ollama/client';
-import { ModelSelector } from './ollama/modelSelector';
-import { PlannerAgent } from './agents/planner';
-import { CoderAgent } from './agents/coder';
-import { TesterAgent } from './agents/tester';
-import { WorkspaceTool } from './tools/workspace';
-import { SearchTool } from './tools/search';
-import { PatchTool } from './tools/patch';
-import { TerminalTool } from './tools/terminal';
-import { ChatViewProvider } from './ui/chatView';
-import { SessionState } from './protocol/types';
-import { McpClientManager } from './utils/mcp-client';
+
+// Upstream modules (preserved unchanged)
+import { OllamaClient }      from './ollama/client';
+import { ModelSelector }     from './ollama/modelSelector';
+import { PlannerAgent }      from './agents/planner';
+import { CoderAgent }        from './agents/coder';
+import { TesterAgent }       from './agents/tester';
+import { WorkspaceTool }     from './tools/workspace';
+import { SearchTool }        from './tools/search';
+import { PatchTool }         from './tools/patch';
+import { TerminalTool }      from './tools/terminal';
+import { ChatViewProvider }  from './ui/chatView';
+import { SessionState }      from './protocol/types';
+
+// New modules
+import { McpClientManager }  from './utils/mcp-client';
+import { ModelManager }      from './ollama/model-manager';
+import { PlanManager }       from './agentic-core/plan-manager';
+import { TaskOrchestrator }  from './agentic-core/task-orchestrator';
+import { StatusBarManager }  from './ui/status-bar';
+import { SidebarProvider }   from './ui/sidebar-provider';
+import { CompletionProvider }          from './providers/completion-provider';
+import { CodeActionProvider, registerCodeActionCommands } from './providers/code-action-provider';
+import { registerSwitchModel }   from './commands/switch-model';
+import { registerGeneratePlan }  from './commands/generate-plan';
+import { registerExecuteTask }   from './commands/execute-task';
+import { registerApplyPatch }    from './commands/apply-patch';
+import { registerReviewChanges } from './commands/review-changes';
+import { Patch } from './protocol/types';
 
 /**
  * Main extension controller
  */
 export class OllamaCopilotExtension {
+  // Upstream fields (unchanged)
   private ollama: OllamaClient;
   private modelSelector: ModelSelector;
   private planner: PlannerAgent;
@@ -38,7 +56,16 @@ export class OllamaCopilotExtension {
   private chatView: ChatViewProvider;
   private session: SessionState;
   private currentMode: 'code' | 'plan' | 'ask' = 'code';
+
+  // New fields
   private mcpClient: McpClientManager;
+  private modelManager: ModelManager;
+  private planManager: PlanManager;
+  private orchestrator: TaskOrchestrator;
+  private statusBar: StatusBarManager;
+  private sidebarProvider: SidebarProvider;
+  /** Patches staged by the orchestrator and awaiting apply. */
+  private pendingPatches: Patch[] = [];
 
   constructor(context: vscode.ExtensionContext) {
     // Get configuration
@@ -73,6 +100,17 @@ export class OllamaCopilotExtension {
 
     // Initialize MCP client manager
     this.mcpClient = new McpClientManager(context);
+
+    // Initialize new agentic-core modules
+    const cfg2 = vscode.workspace.getConfiguration('ollamaCopilot');
+    const apiUrl2 = cfg2.get<string>('apiUrl') ?? 'http://localhost:11434';
+    this.modelManager  = new ModelManager(apiUrl2);
+    this.planManager   = new PlanManager(this.ollama, this.workspace);
+    this.orchestrator  = new TaskOrchestrator(
+      this.ollama, this.planManager, this.workspace, this.patch
+    );
+    this.statusBar     = new StatusBarManager(context);
+    this.sidebarProvider = new SidebarProvider(context, this.chatView, this.statusBar);
 
     // Initialize session state
     this.session = {
@@ -126,11 +164,18 @@ export class OllamaCopilotExtension {
     return this.mcpClient;
   }
 
+  public getModelManager(): ModelManager   { return this.modelManager; }
+  public getPlanManager(): PlanManager     { return this.planManager; }
+  public getOrchestrator(): TaskOrchestrator { return this.orchestrator; }
+  public getStatusBar(): StatusBarManager  { return this.statusBar; }
+  public getPendingPatches(): readonly Patch[] { return this.pendingPatches; }
+
   /**
    * Dispose extension resources (called on deactivation)
    */
   public dispose(): void {
     this.mcpClient.dispose();
+    this.sidebarProvider.dispose();
   }
 
   /**
@@ -679,7 +724,7 @@ export function activate(context: vscode.ExtensionContext) {
         const items = servers.map(s => ({
           label: s.name,
           description: s.enabled ? '$(check) enabled' : '$(circle-slash) disabled',
-          detail: `${s.transport.toUpperCase()} – ${s.url}`
+          detail: `${(s.transport ?? 'sse').toUpperCase()} – ${s.url}`
         }));
 
         await vscode.window.showQuickPick(items, {
@@ -688,6 +733,24 @@ export function activate(context: vscode.ExtensionContext) {
         });
       })
     );
+
+    // -----------------------------------------------------------------------
+    // Enhanced command registrations (delegate to command modules)
+    // -----------------------------------------------------------------------
+    context.subscriptions.push(
+      registerSwitchModel(context, extension.getModelManager(), extension.getStatusBar()),
+      registerGeneratePlan(context, extension.getPlanManager(), extension.getChatView(), extension.getStatusBar()),
+      registerExecuteTask(context, extension.getOrchestrator(), extension.getChatView(), extension.getStatusBar()),
+      registerApplyPatch(context, extension.getChatView(), extension.getStatusBar(), () => extension.getPendingPatches()),
+      registerReviewChanges(context, extension.getChatView(), extension.getStatusBar(), () => extension.getPendingPatches()),
+      ...registerCodeActionCommands(context)
+    );
+
+    // -----------------------------------------------------------------------
+    // Providers (lazy completion + code actions)
+    // -----------------------------------------------------------------------
+    CompletionProvider.registerLazy(context);
+    CodeActionProvider.register(context);
 
     // Dispose MCP resources when the extension is deactivated
     context.subscriptions.push({ dispose: () => extension.dispose() });
