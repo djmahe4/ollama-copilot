@@ -1,7 +1,11 @@
 /**
- * Ollama Copilot Extension - Main Entry Point
- * 
- * An agentic coding assistant powered by local Ollama models
+ * Llama A Coder Extension – Main Entry Point
+ *
+ * Production-grade agentic coding assistant powered by local Ollama models.
+ * Fork of ollama-copilot (anandof28) – evolved with MCP server support and
+ * enhanced agentic command surface.
+ *
+ * DELTA TYPE: MODIFY (metadata + new commands + MCP init; upstream logic preserved)
  */
 
 import * as vscode from 'vscode';
@@ -16,6 +20,7 @@ import { PatchTool } from './tools/patch';
 import { TerminalTool } from './tools/terminal';
 import { ChatViewProvider } from './ui/chatView';
 import { SessionState } from './protocol/types';
+import { McpClientManager } from './utils/mcp-client';
 
 /**
  * Main extension controller
@@ -33,6 +38,7 @@ export class OllamaCopilotExtension {
   private chatView: ChatViewProvider;
   private session: SessionState;
   private currentMode: 'code' | 'plan' | 'ask' = 'code';
+  private mcpClient: McpClientManager;
 
   constructor(context: vscode.ExtensionContext) {
     // Get configuration
@@ -65,6 +71,9 @@ export class OllamaCopilotExtension {
     // Initialize model selector
     this.modelSelector = new ModelSelector();
 
+    // Initialize MCP client manager
+    this.mcpClient = new McpClientManager(context);
+
     // Initialize session state
     this.session = {
       userRequest: '',
@@ -80,6 +89,11 @@ export class OllamaCopilotExtension {
 
     // Initialize models in chat view
     this.refreshModels();
+
+    // Initialize MCP servers asynchronously (non-blocking)
+    this.mcpClient.initialize().catch(err => {
+      console.error('[Llama A Coder] MCP initialization error:', err);
+    });
 
     // Listen for configuration changes
     context.subscriptions.push(
@@ -103,6 +117,20 @@ export class OllamaCopilotExtension {
    */
   public getChatView(): ChatViewProvider {
     return this.chatView;
+  }
+
+  /**
+   * Get the MCP client manager
+   */
+  public getMcpClient(): McpClientManager {
+    return this.mcpClient;
+  }
+
+  /**
+   * Dispose extension resources (called on deactivation)
+   */
+  public dispose(): void {
+    this.mcpClient.dispose();
   }
 
   /**
@@ -540,7 +568,7 @@ ${contextMessage}`
  * Extension activation
  */
 export function activate(context: vscode.ExtensionContext) {
-  console.log('Ollama Copilot extension is activating...');
+  console.log('Llama A Coder extension is activating...');
 
   try {
     // Create extension instance (workspace check will be done when needed)
@@ -554,17 +582,17 @@ export function activate(context: vscode.ExtensionContext) {
       )
     );
 
-    // Register commands
+    // -----------------------------------------------------------------------
+    // Upstream commands (preserved for backward compatibility)
+    // -----------------------------------------------------------------------
     context.subscriptions.push(
       vscode.commands.registerCommand('ollama-copilot.openPanel', () => {
-        // Focus on the chat view
         vscode.commands.executeCommand('ollama-copilot.chatView.focus');
       })
     );
 
     context.subscriptions.push(
       vscode.commands.registerCommand('ollama-copilot.implementFeature', () => {
-        // Focus on the chat view
         vscode.commands.executeCommand('ollama-copilot.chatView.focus');
       })
     );
@@ -575,16 +603,105 @@ export function activate(context: vscode.ExtensionContext) {
       })
     );
 
-    console.log('Ollama Copilot extension activated successfully!');
+    // -----------------------------------------------------------------------
+    // New Llama A Coder commands
+    // -----------------------------------------------------------------------
+
+    /** Hot-swap model without full extension reload */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.switchModel', async () => {
+        await extension.showModelSelector();
+      })
+    );
+
+    /** Trigger Plan Mode: generate a hierarchical implementation plan */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.generatePlan', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '📋 Switch to **Plan** mode in the chat and describe what you want to build.'
+        );
+      })
+    );
+
+    /** Trigger Code Mode: execute the full plan → generate → patch workflow */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.executeTask', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '💻 Switch to **Code** mode in the chat and describe the feature to implement.'
+        );
+      })
+    );
+
+    /** Apply staged patches from the last code-generation run */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.applyPatch', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '🔧 Use the **Apply Patches** button in the chat to apply pending changes.'
+        );
+      })
+    );
+
+    /** Open diff review for staged patches */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.reviewChanges', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '🔍 Review the diff preview above before applying patches.'
+        );
+      })
+    );
+
+    /** Manage MCP server list */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.manageMcpServers', async () => {
+        const servers = extension.getMcpClient().getRegisteredServers();
+        if (servers.length === 0) {
+          const action = await vscode.window.showInformationMessage(
+            'No MCP servers are registered. Open settings to add one.',
+            'Open Settings'
+          );
+          if (action === 'Open Settings') {
+            vscode.commands.executeCommand(
+              'workbench.action.openSettings',
+              'llamaACoder.mcpServers'
+            );
+          }
+          return;
+        }
+
+        const items = servers.map(s => ({
+          label: s.name,
+          description: s.enabled ? '$(check) enabled' : '$(circle-slash) disabled',
+          detail: `${s.transport.toUpperCase()} – ${s.url}`
+        }));
+
+        await vscode.window.showQuickPick(items, {
+          title: 'Registered MCP Servers',
+          placeHolder: 'Select a server to view details'
+        });
+      })
+    );
+
+    // Dispose MCP resources when the extension is deactivated
+    context.subscriptions.push({ dispose: () => extension.dispose() });
+
+    console.log('Llama A Coder extension activated successfully!');
 
     vscode.window.showInformationMessage(
-      '🤖 Ollama Copilot is ready! Open the sidebar to get started.'
+      '🦙 Llama A Coder is ready! Open the sidebar to get started.'
     );
 
   } catch (error) {
-    console.error('Failed to activate Ollama Copilot:', error);
+    console.error('Failed to activate Llama A Coder:', error);
     vscode.window.showErrorMessage(
-      `Failed to activate Ollama Copilot: ${error}`
+      `Failed to activate Llama A Coder: ${error}`
     );
   }
 }
@@ -593,5 +710,5 @@ export function activate(context: vscode.ExtensionContext) {
  * Extension deactivation
  */
 export function deactivate() {
-  console.log('Ollama Copilot extension deactivated');
+  console.log('Llama A Coder extension deactivated');
 }
