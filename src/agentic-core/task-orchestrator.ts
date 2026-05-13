@@ -17,23 +17,19 @@ import { OllamaClient } from '../ollama/client';
 import { PlanManager } from './plan-manager';
 import { WorkspaceTool } from '../tools/workspace';
 import { PatchTool } from '../tools/patch';
-import { Patch, PlannerOutput } from '../protocol/types';
-import { startSpan, endSpan } from '../utils/optimization-engine';
+import { Patch, PlannerOutput, SubTask, TaskStatus, ToolResult, CommandResult } from '../protocol/types';
 import { MemoryManager } from '../utils/memory-manager';
+import { ConversationManager } from '../utils/conversation-manager';
+import { TerminalTool } from '../tools/terminal';
+import { SkillManager } from './skill-manager';
+import { startSpan, endSpan } from '../utils/optimization-engine';
+import { RecoveryAgent } from '../agents/recovery';
+import { McpClientManager } from '../utils/mcp-client';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
-
-export interface SubTask {
-  readonly id: string;
-  readonly description: string;
-  status: TaskStatus;
-  result?: string;
-  error?: string;
-}
 
 export interface OrchestrationResult {
   readonly success: boolean;
@@ -71,8 +67,18 @@ export class TaskOrchestrator {
     private readonly planManager: PlanManager,
     private readonly workspace: WorkspaceTool,
     private readonly patchTool: PatchTool,
-    private readonly memory?: MemoryManager
-  ) {}
+    private readonly terminal: any,
+    private readonly skillManager: SkillManager,
+    private readonly mcpClient: McpClientManager,
+    private readonly memory?: MemoryManager,
+    private readonly conversation?: ConversationManager
+  ) {
+    // Initialize specialized recovery agent
+    this.recoveryAgent = new RecoveryAgent(this.ollama, this.workspace);
+  }
+
+  private recoveryAgent: RecoveryAgent;
+
 
   // -------------------------------------------------------------------------
   // Public API
@@ -84,14 +90,15 @@ export class TaskOrchestrator {
    */
   async run(
     userRequest: string,
-    onProgress?: (msg: string) => void
+    onProgress?: (msg: string) => void,
+    selectedSkills?: string[]
   ): Promise<OrchestrationResult> {
     const span = startSpan('orchestrator:run');
     const patches: Patch[] = [];
-    let plan: PlannerOutput | null = null;
-
-    // --- REASON: generate plan (technique 5 – ReAct)
+    
+    // --- REASON: generate initial plan
     onProgress?.('🧠 Reasoning: generating implementation plan…');
+    let plan: PlannerOutput;
     try {
       plan = await this.withRetry(
         () => this.planManager.plan(userRequest, onProgress),
@@ -109,9 +116,48 @@ export class TaskOrchestrator {
       status: 'pending' as TaskStatus
     }));
 
-    // --- ACT: execute subtasks (safe parallel batches, technique 28)
-    onProgress?.(`⚙️ Executing ${subTasks.length} subtasks…`);
-    await this.executeSubTasksInBatches(subTasks, plan, patches, onProgress);
+    // --- ReAct Loop: execute, observe, and reason
+    let stepsTaken = 0;
+    const MAX_STEPS = 20;
+
+    while (subTasks.some(t => t.status === 'pending') && stepsTaken < MAX_STEPS) {
+      stepsTaken++;
+      const task = subTasks.find(t => t.status === 'pending')!;
+      
+      // ACT: execute a single subtask
+      onProgress?.(`⚙️ Executing ${task.id}: ${task.description}...`);
+      
+      // executeSubTask now returns any generated patches
+       const taskPatches = await this.executeSubTask(task, plan, onProgress, selectedSkills);
+
+      
+      if (taskPatches && taskPatches.length > 0) {
+        onProgress?.(`🛠️ Applying ${taskPatches.length} patches...`);
+        const applyResult = await this.applyAndVerifyPatches(taskPatches, onProgress);
+        
+        if (applyResult.success) {
+          patches.push(...applyResult.patches);
+          onProgress?.(`✓ Patches applied successfully.`);
+        } else {
+          onProgress?.(`❌ Patch failure: ${applyResult.errors.join(', ')}`);
+          // We don't mark as failed yet, the reasoning step can decide to fix it
+        }
+      }
+
+      // OBSERVE & REASON: analyze results and adjust plan
+      onProgress?.('🧠 Observing result and reasoning about next steps...');
+      const decision = await this.reason(userRequest, plan, subTasks);
+
+      if (decision.action === 'modify_plan') {
+        onProgress?.('🔄 Adjusting plan based on observations...');
+         this.updateTasks(subTasks, decision.updates ?? []);
+        // Update the plan object to reflect the new steps
+        plan = { ...plan, steps: subTasks.map(t => t.description) };
+      } else if (decision.action === 'done') {
+        onProgress?.('✅ Goal achieved. Finishing execution.');
+        break;
+      }
+    }
 
     const elapsed = endSpan('orchestrator:run');
     const success = subTasks.every(t => t.status !== 'failed');
@@ -124,66 +170,146 @@ export class TaskOrchestrator {
     };
   }
 
-  // -------------------------------------------------------------------------
-  // ReAct: subtask execution
-  // -------------------------------------------------------------------------
-
   /**
-   * Execute subtasks in safe parallel batches (technique 28).
-   * Only truly independent steps (no shared file targets) run in parallel.
+   * ReAct Reason step: analyzes current progress and decides whether to 
+   * continue, modify the plan, or stop.
    */
-  private async executeSubTasksInBatches(
-    subTasks: SubTask[],
+  private async reason(
+    userRequest: string,
     plan: PlannerOutput,
-    patches: Patch[],
-    onProgress?: (msg: string) => void
-  ): Promise<void> {
-    const batches = this.buildBatches(subTasks, plan.files_to_read);
+    subTasks: SubTask[]
+  ): Promise<{ action: 'continue' | 'modify_plan' | 'done'; updates?: {id: string, newDesc: string}[] }> {
+    await this.respectRateLimit();
 
-    for (const batch of batches) {
-      await Promise.all(
-        batch.map(task => this.executeSubTask(task, plan, patches, onProgress))
-      );
-      const failed = batch.filter(t => t.status === 'failed');
-      if (failed.length > 0) {
-        onProgress?.(`⚠️ ${failed.length} subtask(s) failed: ${failed.map(t => t.id).join(', ')}`);
+    // --- CONTEXT COMPRESSION ---
+    // Instead of raw results, we use summaries for completed tasks to prevent "lost in the middle" hallucinations
+    const progress = subTasks.map(t => {
+      const status = `[${t.status}]`;
+      const detail = t.summary || (t.result ? t.result.slice(0, 100) : '');
+      return `${t.id}: ${t.description} ${status} - ${detail}`;
+    }).join('\n');
+    
+    const prompt = `You are an agent orchestrator. Analyze the current progress of a coding task.
+    
+User Request: ${userRequest}
+Feature: ${plan.feature}
+
+Current Task Progress (Compressed):
+${progress}
+
+Based on the results so far, should we:
+1. "continue": The current plan is still valid.
+2. "modify_plan": A subtask revealed something that requires changing future steps.
+3. "done": The goal is achieved.
+
+Respond ONLY in JSON format:
+{
+  "action": "continue" | "modify_plan" | "done",
+  "updates": [ { "id": "step-X", "newDesc": "updated description" } ] // only if modify_plan
+}`;
+
+     const response = await this.ollama.chat(
+       [{ role: 'user', content: prompt }],
+       { 
+         temperature: 0.1, 
+         // eslint-disable-next-line @typescript-eslint/naming-convention
+         num_predict: 300 
+       }
+     );
+
+    try {
+      return JSON.parse(response);
+    } catch {
+      return { action: 'continue' }; // Default to continue on parse error
+    }
+  }
+
+  /** Update existing subtasks based on reasoning. */
+  private updateTasks(subTasks: SubTask[], updates: {id: string, newDesc: string}[]): void {
+    for (const update of updates) {
+      const task = subTasks.find(t => t.id === update.id);
+      if (task) {
+        task.description = update.newDesc;
       }
     }
   }
 
-  /** Group independent subtasks into parallel batches. */
-  private buildBatches(subTasks: SubTask[], sharedFiles: string[]): SubTask[][] {
-    // Run sequentially when shared files exist to avoid write conflicts
-    if (sharedFiles.length > 0) {
-      return subTasks.map(t => [t]);
+  // -------------------------------------------------------------------------
+  // ReAct: subtask execution
+  // -------------------------------------------------------------------------
+
+
+  /**
+   * Summarizes a task result to prevent context window bloat and hallucinations.
+   */
+  private async summarizeResult(taskId: string, result: string): Promise<string> {
+    if (!result || result.length < 200) {
+      return result;
     }
-    const batchSize = 2;
-    const batches: SubTask[][] = [];
-    for (let i = 0; i < subTasks.length; i += batchSize) {
-      batches.push(subTasks.slice(i, i + batchSize));
+
+    try {
+      const prompt = `Summarize the following technical result into a single, concise sentence that captures the core outcome and any critical errors. 
+      Keep it under 100 characters.
+      
+      RESULT:
+      ${result.slice(0, 2000)}`;
+
+      const summary = await this.ollama.chat(
+        [{ role: 'user', content: prompt }],
+        { temperature: 0.1, num_predict: 100 }
+      );
+      return summary.trim();
+    } catch {
+      return result.slice(0, 100) + '...';
     }
-    return batches;
   }
 
   /** Execute one subtask with retry + backoff (technique 15). */
   private async executeSubTask(
     task: SubTask,
     plan: PlannerOutput,
-    _patches: Patch[],
-    onProgress?: (msg: string) => void
-  ): Promise<void> {
+    onProgress?: (msg: string) => void,
+    selectedSkills?: string[]
+  ): Promise<Patch[] | null> {
     task.status = 'running';
     try {
-      const result = await this.withRetry(
-        () => this.reactStep(task.description, plan),
-        task.id
-      );
-      task.result = result;
+       const result = await this.withRetry(
+         () => this.reactStep(task.description, plan, selectedSkills),
+         task.id
+       );
+       
+       // Record the assistant's reasoning/action in conversation history
+       this.conversation?.addMessage('assistant', `Task ${task.id} execution: ${result.slice(0, 500)}...`);
+       
+       // Extract patches if the result is a CoderOutput JSON
+      try {
+        const parsed = JSON.parse(result);
+        if (parsed.patches && Array.isArray(parsed.patches)) {
+          onProgress?.(`  🛠️ Generated ${parsed.patches.length} patches for ${task.id}`);
+          task.result = parsed.notes?.join('\\n') || result;
+          
+          // --- CONTEXT COMPRESSION ---
+           task.summary = await this.summarizeResult(task.id, task.result || '');
+          
+          task.status = 'done';
+          onProgress?.(`  ✓ ${task.id}: ${task.description.slice(0, 60)}`);
+          return parsed.patches;
+        }
+        task.result = result;
+      } catch {
+        task.result = result;
+      }
+
+      // Compress result if it's just a string
+      task.summary = await this.summarizeResult(task.id, task.result || '');
+
       task.status = 'done';
       onProgress?.(`  ✓ ${task.id}: ${task.description.slice(0, 60)}`);
+      return null;
     } catch (err) {
       task.error = String(err);
       task.status = 'failed';
+      return null;
     }
   }
 
@@ -194,32 +320,165 @@ export class TaskOrchestrator {
    */
   private async reactStep(
     taskDescription: string,
-    plan: PlannerOutput
+    plan: PlannerOutput,
+    selectedSkills?: string[]
   ): Promise<string> {
     await this.respectRateLimit();
+    
+    // --- MCP TOOL DISCOVERY ---
+    const tools = await this.mcpClient.listTools();
+    const toolsContext = tools.length > 0 
+      ? `\\n\\n## Available MCP Tools:\\n` + tools.map(t => `- ${t.name}: ${t.description}`).join('\\n')
+      : 'No MCP tools available.';
 
-    // Retrieve relevant memory context (<100 ms synchronous search)
-    const memContext = this.memory
-      ? this.memory.buildContext(this.memory.search(taskDescription, 4))
-      : '';
+    // --- SKILL INJECTION ---
+    const skillsContext = selectedSkills && selectedSkills.length > 0 
+      ? selectedSkills.join('\\n\\n') 
+      : 'No specific skills selected for this task.';
+    
+    // Retrieve LTM (Code) context
+    const memoryResults = await this.memory?.search(taskDescription, 10) ?? [];
+    const codeContext = this.memory?.buildContext(memoryResults) ?? '';
+    
+    // Retrieve STM (Conversational) context
+    const convHistory = this.conversation?.getModelReadyHistory() ?? [];
+    const convContext = convHistory.map(m => `${m.role}: ${m.content}`).join('\\n');
+    
+    const prompt = `You are an expert software engineer. 
+    
+    ## Conversational State:
+    ${convContext}
 
-    const prompt =
-      (memContext ? `${memContext}\n\n` : '') +
-      `You are an expert coder. Reason briefly then describe what changes ` +
-      `would implement this step:\n\nStep: ${taskDescription}\n\n` +
-      `Feature: ${plan.feature}\nFiles in scope: ${plan.files_to_read.join(', ')}`;
+    ## Available MCP Tools:
+    ${toolsContext}
 
-    return this.ollama.chat(
-      [{ role: 'user', content: prompt }],
-      { temperature: 0.2, num_predict: 400 }
-    );
+    ## Inherited Skills & Rules:
+    ${skillsContext}
+    
+    ## Project Code Context:
+    ${codeContext}
+    
+    ## Implementation Plan:
+    Feature: ${plan.feature}
+    Plan: ${plan.steps.join(' → ')}
+    
+    ## Current Task:
+    ${taskDescription}
+    
+    Based on the context and rules above, provide a detailed analysis and the necessary code changes. 
+    
+    If you need more information, you may call a tool using the format:
+    CALL: tool_name { "param": "value" }
+    
+    If you are generating code, you MUST return a JSON object matching the CoderOutput interface:
+    {
+      "patches": [ { "path": "file/path", "diff": "unified diff" } ],
+      "notes": [ "explanation 1", "explanation 2" ]
+    }
+    Otherwise, return a descriptive observation of what needs to be done.`;
+    
+    let currentPrompt = prompt;
+    let stepsTaken = 0;
+    const MAX_REACT_STEPS = 5;
+
+    while (stepsTaken < MAX_REACT_STEPS) {
+      stepsTaken++;
+      const response = await this.ollama.chat(
+        [{ role: 'user', content: currentPrompt }],
+        { temperature: 0.1, num_predict: 2000 }
+      );
+
+      if (response.includes('CALL:')) {
+        const toolCallMatch = response.match(/CALL: (\w+)\s+({.*})/);
+        if (toolCallMatch) {
+          const [_, toolName, paramsJson] = toolCallMatch;
+          
+            try {
+              const params = JSON.parse(paramsJson);
+              // Resolve tool intent if necessary or call directly
+              const toolResolution = await this.mcpClient.resolveToolByIntent(
+                `Use tool ${toolName} with params ${paramsJson}`, 
+                this.ollama
+              );
+              
+              if (toolResolution) {
+                const toolResult = await this.mcpClient.callTool(toolResolution.serverName, {
+                  tool: toolResolution.tool,
+                  params: toolResolution.params
+                });
+                
+                const resultData = toolResult.success ? toolResult.data : toolResult.error;
+                currentPrompt += `\\n\\nObservation from ${toolResolution.tool}:\\n${resultData}`;
+              } else {
+                // Fallback to direct call if resolution fails, but we still need a serverName
+                // In a real system, we'd need a way to map toolName -> serverName
+                currentPrompt += `\\n\\nError: Could not resolve tool ${toolName} to a registered MCP server.`;
+              }
+            } catch (err) {
+              currentPrompt += `\\n\\nError executing tool ${toolName}: ${err}`;
+            }
+        }
+      }
+      
+      return response;
+    }
+
+    return `Reached max ReAct steps. Last response: ${currentPrompt}`;
+  }
+  /**
+   * Robustly applies patches and enters a recovery loop if they fail.
+   */
+  async applyAndVerifyPatches(
+    patches: Patch[], 
+    onProgress?: (msg: string) => void
+  ): Promise<{ success: boolean; patches: Patch[]; errors: string[] }> {
+    const finalPatches: Patch[] = [];
+    const errors: string[] = [];
+
+    for (let i = 0; i < patches.length; i++) {
+      let currentPatch = patches[i];
+      let applied = false;
+      let attempts = 0;
+      const MAX_RECOVERY_ATTEMPTS = 3;
+
+      while (!applied && attempts < MAX_RECOVERY_ATTEMPTS) {
+        attempts++;
+        const result = await this.patchTool.applyPatch(currentPatch);
+        
+        if (result.success) {
+          applied = true;
+          finalPatches.push(currentPatch);
+        } else {
+          onProgress?.(`⚠️ Patch failed for ${currentPatch.path}. Attempting recovery ${attempts}/${MAX_RECOVERY_ATTEMPTS}...`);
+          
+          // 1. Debugging: Extract current context via OS-independent helper
+          const searchSnippet = currentPatch.diff.split('\n').find(l => l.startsWith(' ') && l.length > 10) || ' ';
+           const actualContext = await this.terminal.getDebugContext(currentPatch.path, searchSnippet || ' ');
+
+          // 2. Delegate to Recovery Agent
+           const recovery = await this.recoveryAgent.recover(currentPatch, result.error || 'Unknown error', actualContext);
+          
+          if (recovery.success && recovery.correctedPatch) {
+            onProgress?.(`💡 Recovery Agent found a fix: ${recovery.explanation}`);
+            currentPatch = recovery.correctedPatch; // Update patch for next attempt
+          } else {
+            errors.push(`${currentPatch.path}: ${result.error} (Recovery failed: ${recovery.explanation})`);
+            break; // Stop attempting this patch
+          }
+        }
+      }
+    }
+
+    return {
+      success: errors.length === 0,
+      patches: finalPatches,
+      errors
+    };
   }
 
-  // -------------------------------------------------------------------------
-  // Utilities: retry + rate limiting  (techniques 15, 16)
-  // -------------------------------------------------------------------------
-
   private async withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+
+  // Duplicate removed
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {

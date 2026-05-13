@@ -142,10 +142,14 @@ export class SelfCritique {
     );
 
     try {
-      const raw = await this.ollama.chat(
-        [{ role: 'user', content: prompt }],
-        { temperature: 0.1, num_predict: 600 }
-      );
+       const raw = await this.ollama.chat(
+         [{ role: 'user', content: prompt }],
+         { 
+           temperature: 0.1, 
+           // eslint-disable-next-line @typescript-eslint/naming-convention
+           num_predict: 600 
+         }
+       );
       const issues = parseCritiqueIssues(raw);
       return { label: `llm-pass-${index}`, issues, verdict: verdictFromIssues(issues) };
     } catch {

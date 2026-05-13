@@ -108,10 +108,14 @@ export class PlanManager {
     // Generate branch ideas in a single call to save latency
     const ideasPrompt = buildIdeasPrompt(userRequest, context);
     onProgress?.('🌿 Generating plan branch ideas…');
-    const ideasRaw = await this.ollama.chat(
-      [{ role: 'user', content: ideasPrompt }],
-      { temperature: 0.7, num_predict: 600 }
-    );
+     const ideasRaw = await this.ollama.chat(
+       [{ role: 'user', content: ideasPrompt }],
+       { 
+         temperature: 0.7, 
+         // eslint-disable-next-line @typescript-eslint/naming-convention
+         num_predict: 600 
+       }
+     );
     const ideas = parseIdeas(ideasRaw, TOT_BRANCHES);
 
     // Evaluate each branch sequentially (keep resource usage bounded)

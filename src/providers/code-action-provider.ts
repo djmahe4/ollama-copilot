@@ -145,19 +145,20 @@ export function registerCodeActionCommands(
         const apiUrl = cfg.get<string>('apiUrl')  ?? 'http://localhost:11434';
         const model  = cfg.get<string>('model')   ?? 'qwen2.5-coder:7b';
 
-        // Dynamic import (technique 14)
-        const { OllamaClient } = await import('../ollama/client');
-        const client = new OllamaClient(apiUrl, model);
+         // Dynamic import (technique 14)
+         const { OllamaClient: ollamaClient } = await import('../ollama/client');
+         const client = new ollamaClient(apiUrl, model);
 
         await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Llama A Coder: ${kind}…`, cancellable: false },
           async () => {
             const prompt = buildPrompt(kind, document.languageId, selectedText);
             try {
-              const result = await client.chat(
-                [{ role: 'user', content: prompt }],
-                { temperature: 0.1, num_predict: MAX_FIX_TOKENS }
-              );
+               const result = await client.chat(
+                 [{ role: 'user', content: prompt }],
+                 // eslint-disable-next-line @typescript-eslint/naming-convention
+                 { temperature: 0.1, num_predict: MAX_FIX_TOKENS }
+               );
               if (result.trim()) {
                 const edit = new vscode.WorkspaceEdit();
                 if (kind === 'explain') {

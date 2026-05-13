@@ -117,7 +117,7 @@ export class Verifier {
     const passes: VerificationPass[] = [];
 
     // Retrieve memory context once for all passes (fast, synchronous)
-    const memContext = this.buildMemoryContext(patches);
+    const memContext = await this.buildMemoryContext(patches);
     if (memContext) {
       onProgress?.('📚 Memory context retrieved for verification…');
     }
@@ -165,10 +165,10 @@ export class Verifier {
    * Retrieve memory context relevant to the patches being verified.
    * Returns a formatted string ready for prompt injection, or '' if none.
    */
-  private buildMemoryContext(patches: readonly Patch[]): string {
+  private async buildMemoryContext(patches: readonly Patch[]): Promise<string> {
     if (!this.memory) { return ''; }
     const query = patches.map(p => p.path).join(' ');
-    const results = this.memory.search(query, 5);
+    const results = await this.memory.search(query, 5);
     return this.memory.buildContext(results);
   }
 }

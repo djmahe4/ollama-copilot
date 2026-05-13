@@ -40,10 +40,20 @@ export interface McpToolResult {
   readonly error?: string;
 }
 
+export interface McpToolMetadata {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: any;
+}
+
+export interface McpToolDefinition extends McpToolMetadata {
+  readonly serverName: string;
+}
+
 /** Internal runtime entry that augments config with discovered tool metadata. */
 interface McpServerEntry {
   readonly config: McpServerConfig;
-  tools: string[];
+  tools: McpToolDefinition[];
   reachable: boolean;
 }
 
@@ -137,20 +147,85 @@ export class McpClientManager {
     return Array.from(this.servers.values()).map(e => ({ ...e.config }));
   }
 
-  // -------------------------------------------------------------------------
-  // Tool invocation
-  // -------------------------------------------------------------------------
+  /**
+   * Fetches all available tools from all reachable MCP servers.
+   */
+  async listTools(): Promise<McpToolDefinition[]> {
+    const allTools: McpToolDefinition[] = [];
+    
+    for (const [serverName, entry] of this.servers.entries()) {
+      if (!entry.reachable || !entry.config.enabled) {
+        continue;
+      }
+      
+      try {
+        // MCP standard: GET /tools or POST /tools/list
+         const tools = await this.fetchToolsFromServer(entry.config);
+         allTools.push(...tools.map((t): McpToolDefinition => ({ ...t, serverName })));
+      } catch (err) {
+        console.error(`[McpClientManager] Failed to fetch tools from ${serverName}:`, err);
+      }
+    }
+    
+    return allTools;
+  }
+
+  private async fetchToolsFromServer(config: McpServerConfig): Promise<McpToolMetadata[]> {
+    // Stub for actual MCP tool discovery protocol
+    // In a real implementation, this would call the MCP server's tool listing endpoint
+    if (config.name === 'Context7') {
+      return [
+        { name: 'search_docs', description: 'Search for documentation in Context7', inputSchema: { query: 'string' } },
+        { name: 'query_library', description: 'Query a specific library by ID', inputSchema: { libraryId: 'string', query: 'string' } }
+      ];
+    }
+    return [];
+  }
 
   /**
-   * Call a tool on the named MCP server.
-   *
-   * All inputs are validated before dispatch. No arbitrary code is executed;
-   * only whitelisted HTTP/SSE requests are made.
-   *
-   * @param serverName - Registered server name
-   * @param call       - Tool name and parameters
+   * Semantically resolves a tool based on a natural language intent.
    */
-  async callTool(serverName: string, call: McpToolCall): Promise<McpToolResult> {
+  async resolveToolByIntent(intent: string, ollama: any): Promise<{ serverName: string, tool: string, params: any } | null> {
+    const tools = await this.listTools();
+    if (tools.length === 0) {
+      return null;
+    }
+
+    const toolCatalog = tools.map(t => `${t.serverName}:${t.name} - ${t.description}`).join('\n');
+    
+    const prompt = `You are a tool dispatcher. Given the user intent, select the best tool from the catalog.
+    
+    User Intent: ${intent}
+    
+    Tool Catalog:
+    ${toolCatalog}
+    
+    Respond ONLY in JSON format:
+    {
+      "serverName": "...",
+      "tool": "...",
+      "params": { ... }
+    }
+    If no tool matches, return null.`;
+
+    try {
+      const response = await ollama.chat([{ role: 'user', content: prompt }], { temperature: 0 });
+      return JSON.parse(response);
+    } catch (err) {
+      console.error('[McpClientManager] Intent resolution failed:', err);
+      return null;
+    }
+    }
+    
+    /**
+     * All inputs are validated before dispatch. No arbitrary code is executed;
+     * only whitelisted HTTP/SSE requests are made.
+     *
+     * @param serverName - Registered server name
+     * @param call       - Tool name and parameters
+     */
+    async callTool(serverName: string, call: McpToolCall): Promise<McpToolResult> {
+
     const entry = this.servers.get(serverName);
     if (!entry) {
       return { success: false, error: `MCP server '${serverName}' is not registered` };
@@ -197,7 +272,7 @@ export class McpClientManager {
   private async autoDiscover(): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('llamaACoder');
     const preferContext7 = cfg.get<boolean>('mcpPreferContext7') !== false;
-
+    
     if (preferContext7 && !this.servers.has('Context7')) {
       const reachable = await this.probe(CONTEXT7_SSE_URL);
       if (reachable) {
@@ -211,17 +286,20 @@ export class McpClientManager {
         const entry = this.servers.get('Context7');
         if (entry) {
           entry.reachable = true;
+          // Pre-fetch tools for the discovered server
+            entry.tools = (await this.fetchToolsFromServer(config)).map(t => ({ ...t, serverName: config.name }));
         }
         console.log('[Llama A Coder] Context7 MCP server auto-discovered');
       }
     }
-
+    
     // Mark all registered servers with reachability results
     await Promise.all(
       Array.from(this.servers.entries()).map(async ([name, entry]) => {
         if (!entry.reachable) {
           entry.reachable = await this.probe(entry.config.url);
           if (entry.reachable) {
+             entry.tools = (await this.fetchToolsFromServer(entry.config)).map(t => ({ ...t, serverName: name }));
             console.log(`[Llama A Coder] MCP server reachable: ${name}`);
           }
         }

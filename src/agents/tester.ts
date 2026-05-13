@@ -8,7 +8,7 @@ import { TESTER_SYSTEM_PROMPT, buildTesterPrompt } from '../protocol/prompts';
 import { TerminalTool } from '../tools/terminal';
 import { WorkspaceTool } from '../tools/workspace';
 import * as path from 'path';
-import { parseJsonObject } from './jsonParser';
+import { parseJsonObject, parseAndRetryJson } from './jsonParser';
 
 export class TesterAgent {
   private ollama: OllamaClient;
@@ -105,30 +105,12 @@ export class TesterAgent {
 
       onProgress?.('Generating fix...');
 
-      let response = await this.ollama.chat(messages, {
-        temperature: 0.1,
-        num_predict: 3000
-      });
-
-      // Parse JSON
-      let fix = parseJsonObject<TestFix>(response);
-
-      if (!fix) {
-        onProgress?.('Retrying JSON parsing...');
-        
-        messages.push({ role: 'assistant', content: response });
-        messages.push({ 
-          role: 'user', 
-          content: 'The JSON is invalid. Please output ONLY valid JSON.' 
-        });
-
-        response = await this.ollama.chat(messages);
-        fix = parseJsonObject<TestFix>(response);
-      }
-
-      if (!fix) {
-        throw new Error('Failed to get valid fix from tester');
-      }
+      const fix = await parseAndRetryJson<TestFix>(
+        this.ollama,
+        messages,
+        { temperature: 0.1, num_predict: 3000 },
+        (msg: string) => onProgress?.(msg)
+      );
 
       if (!this.isValidTestFix(fix)) {
         throw new Error('Invalid test fix structure');

@@ -27,6 +27,17 @@ export interface OllamaChatResponse {
 }
 
 // Agent Plan types
+export type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export interface SubTask {
+  readonly id: string;
+  description: string;
+  status: TaskStatus;
+  result?: string;
+  summary?: string; // Compressed summary of the result
+  error?: string;
+}
+
 export interface PlannerOutput {
   feature: string;
   assumptions: string[];

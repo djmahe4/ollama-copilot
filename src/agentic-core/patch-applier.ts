@@ -104,7 +104,9 @@ export class PatchApplier {
 
     // Non-blocking memory update for successfully applied patches
     if (succeeded.length > 0 && this.memory) {
-      this.memory.indexPatches(succeeded, this.workspace.getWorkspaceRoot());
+      this.memory.indexPatches(succeeded, this.workspace.getWorkspaceRoot()).catch(err => {
+        console.error('[PatchApplier] Background indexing failed:', err);
+      });
     }
 
     const successCount = applied.filter(r => r.success).length;

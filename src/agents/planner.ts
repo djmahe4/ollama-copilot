@@ -6,7 +6,7 @@ import { OllamaClient } from '../ollama/client';
 import { PlannerOutput, OllamaMessage } from '../protocol/types';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from '../protocol/prompts';
 import { WorkspaceTool } from '../tools/workspace';
-import { parseJsonObject } from './jsonParser';
+import { parseJsonObject, parseAndRetryJson } from './jsonParser';
 
 export class PlannerAgent {
   private ollama: OllamaClient;
@@ -41,33 +41,13 @@ export class PlannerAgent {
 
       onProgress?.('Creating implementation plan...');
       
-      let response = await this.ollama.chat(messages, {
-        temperature: 0.2,
-        num_predict: 2000
-      });
+      const plan = await parseAndRetryJson<PlannerOutput>(
+        this.ollama,
+        messages,
+        { temperature: 0.2, num_predict: 2000 },
+        (msg: string) => onProgress?.(msg)
+      );
 
-      // Parse JSON response (with retry logic)
-      let plan = parseJsonObject<PlannerOutput>(response);
-      
-      if (!plan) {
-        onProgress?.('Retrying JSON parsing...');
-        
-        // Retry with explicit instruction to fix JSON
-        messages.push({ role: 'assistant', content: response });
-        messages.push({ 
-          role: 'user', 
-          content: 'The JSON is invalid. Please output ONLY valid JSON with no markdown or extra text.' 
-        });
-
-        response = await this.ollama.chat(messages);
-        plan = parseJsonObject<PlannerOutput>(response);
-      }
-
-      if (!plan) {
-        throw new Error('Failed to get valid JSON response from planner');
-      }
-
-      // Validate the plan structure
       if (!this.isValidPlan(plan)) {
         throw new Error('Invalid plan structure');
       }

@@ -33,22 +33,23 @@ import { Patch } from '../protocol/types';
 // Public types
 // ---------------------------------------------------------------------------
 
+type MemoryType = 'STM' | 'LTM';
+type EntityType = 'file' | 'function' | 'class' | 'requirement' | 'decision' | 'test';
+
 export interface MemoryEntry {
-  /** Stable ID: hash of filePath + startLine. */
   readonly id: string;
-  readonly filePath: string;
-  readonly startLine: number;
-  readonly endLine: number;
-  /** Raw source content of the chunk. */
-  readonly content: string;
-  /** One-sentence semantic description (generated or extracted). */
+  readonly type: MemoryType | 'capability';
+  readonly filePath?: string;
+  readonly startLine?: number;
+  readonly endLine?: number;
   readonly description: string;
-  /** Other file:line locations that reference this symbol. */
-  readonly refs: readonly string[];
-  /** Embedding vector. */
+  readonly content: string;
   readonly vector: readonly number[];
-  readonly updatedAt: number;
+  readonly relations: Array<{ type: string; targetId: string }>;
+  readonly timestamp: number;
+  readonly ttl?: number; // for STM
 }
+
 
 export interface MemorySearchResult {
   readonly entry: MemoryEntry;
@@ -62,29 +63,44 @@ export interface MemoryStats {
   readonly lastFlushMs: number;
 }
 
+interface MemoryMap {
+  [sourceId: string]: Array<{ relation: string; targetId: string }>;
+}
+
+interface IndexingRule {
+  include: string[];
+  exclude: string[];
+  maxSizeKB: number;
+}
+
+interface VectorIndex {
+  entries: Map<string, { vector: number[]; metadata: { uri: string; chunkIndex: number } }>;
+  dimension: number;
+  lastUpdated: number;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const STORE_DIR        = path.join('.ollama-agentic', 'memory');
+const LTM_FILE         = 'memory.json';
 const VECTORS_FILE     = 'vectors.jsonl';
-const META_FILE        = 'meta.json';
-/** Flush in-memory dirty entries to disk at most once per this interval. */
 const FLUSH_INTERVAL_MS = 5_000;
-/** Embedding vector dimension for the feature-hash fallback. */
-const HASH_DIM = 256;
-/** Default Ollama embedding model (pulled separately from code model). */
+const HASH_DIM         = 256;
 const DEFAULT_EMBED_MODEL = 'nomic-embed-text';
-/** Top-K results returned by search. */
-const DEFAULT_TOP_K = 8;
+const DEFAULT_TOP_K    = 8;
 
 // ---------------------------------------------------------------------------
 // MemoryManager
 // ---------------------------------------------------------------------------
 
 export class MemoryManager implements vscode.Disposable {
-  /** In-memory index: id → entry. */
-  private readonly index = new Map<string, MemoryEntry>();
+  /** In-memory cache of LTM and STM entries. */
+  private index = new Map<string, MemoryEntry>();
+  private stm = new Map<string, MemoryEntry>();
+  private memoryMap: MemoryMap = {};
+  private vectorIndex: VectorIndex | null = null;
   /** IDs written in this session but not yet flushed. */
   private readonly dirty = new Set<string>();
 
@@ -93,15 +109,22 @@ export class MemoryManager implements vscode.Disposable {
   private flushTimer: ReturnType<typeof setInterval> | undefined;
   private initialised = false;
 
+  private indexingRules: IndexingRule = {
+    include: ['**/*.ts', '**/*.js', '**/*.py', '**/*.md', '**/*.json', '**/*.yaml', '**/*.tsx', '**/*.jsx'],
+    exclude: ['**/node_modules/**', '**/dist/**', '**/build/**', '**/*.min.js', '**/coverage/**'],
+    maxSizeKB: 500,
+  };
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  /** Initialise: resolve store path, load existing entries, start flush timer. */
   async initialize(): Promise<void> {
-    if (this.initialised) { return; }
+    if (this.initialised) {
+      return;
+    }
 
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!root) {
@@ -111,18 +134,27 @@ export class MemoryManager implements vscode.Disposable {
 
     this.storePath = path.join(root, STORE_DIR);
     await this.ensureStoreDir();
+    await this.loadState();
     await this.loadFromDisk();
 
-    // Periodic flush (non-blocking, technique 10 – leak prevention via dispose)
     this.flushTimer = setInterval(() => {
       this.flushDirtyAsync();
     }, FLUSH_INTERVAL_MS);
 
     this.initialised = true;
-    console.log(`[MemoryManager] Loaded ${this.index.size} entries from ${this.storePath}`);
+    console.log(`[MemoryManager] Initialized with ${this.index.size} LTM entries`);
+  }
+
+  private async persistState(): Promise<void> {
+    const state = {
+      memoryMap: this.memoryMap,
+      vectorIndex: this.vectorIndex,
+    };
+    await fs.promises.writeFile(path.join(this.storePath, LTM_FILE), JSON.stringify(state, null, 2), 'utf8');
   }
 
   dispose(): void {
+
     if (this.flushTimer !== undefined) {
       clearInterval(this.flushTimer);
       this.flushTimer = undefined;
@@ -132,29 +164,121 @@ export class MemoryManager implements vscode.Disposable {
   }
 
   // -------------------------------------------------------------------------
-  // Indexing (fire-and-forget, <50 ms overhead on calling thread)
+  // Indexing Pipeline (Phase 1: Git-aware Flat Indexing)
   // -------------------------------------------------------------------------
 
   /**
-   * Index changed files from applied patches.
-   * Called after a successful patch application.
-   * Non-blocking: heavy work queued via queueMicrotask.
+   * Scans the workspace for relevant files based on rules and .gitignore.
+   * @param debugMode If true, overrides .gitignore to scan all matching files.
    */
-  indexPatches(patches: readonly Patch[], workspaceRoot: string): void {
-    if (!this.initialised) { return; }
-    // Hand off to microtask queue immediately – caller is unblocked
-    queueMicrotask(() => {
-      this.indexPatchesAsync(patches, workspaceRoot).catch(err =>
-        console.error('[MemoryManager] indexPatches error:', err)
-      );
+  async indexWorkspace(debugMode = false): Promise<string[]> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) {
+      return [];
+    }
+
+    // 1. Get all files matching include patterns
+    const files = await vscode.workspace.findFiles(
+      this.indexingRules.include[0], 
+      this.indexingRules.exclude.join(','),
+      1000
+    );
+
+    const relativePaths = files.map(uri => {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      return root ? path.relative(root, uri.fsPath) : uri.fsPath;
+    });
+    
+    if (debugMode) {
+      return relativePaths;
+    }
+
+    // 2. Filter by .gitignore
+    const ignorePatterns = await this.loadGitignorePatterns();
+    return relativePaths.filter(p => !this.isIgnored(p, ignorePatterns));
+  }
+
+  /**
+   * Fully index the workspace. 
+   * This is the "Knowledge Compilation" step from the LLM Wiki paradigm.
+   */
+  async indexWorkspaceFull(debugMode = false): Promise<{ indexed: number; errors: number }> {
+    const files = await this.indexWorkspace(debugMode);
+    let indexedCount = 0;
+    let errorCount = 0;
+
+    const cfg = vscode.workspace.getConfiguration('ollamaCopilot');
+    const baseUrl = cfg.get<string>('apiUrl') ?? 'http://localhost:11434';
+
+    for (const relativePath of files) {
+      try {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const fullPath = path.join(root!, relativePath);
+         const content = await fs.promises.readFile(fullPath, 'utf8');
+        
+        // Logical splitting (AST-lite)
+        const modules = splitIntoModules(content);
+        
+        for (const mod of modules) {
+          const vector = await this.computeVector(mod.content);
+          const id = stableId(relativePath, mod.startLine);
+          
+            this.index.set(id, {
+              id,
+              type: 'LTM',
+              filePath: relativePath,
+              startLine: mod.startLine,
+              endLine: mod.endLine,
+              description: mod.name ?? 'code chunk',
+              content: mod.content.slice(0, 1500),
+              vector,
+              relations: [],
+              timestamp: Date.now()
+            });
+
+          this.dirty.add(id);
+          indexedCount++;
+        }
+      } catch (err) {
+        errorCount++;
+      }
+    }
+
+    await this.persistState();
+    return { indexed: indexedCount, errors: errorCount };
+  }
+
+  private async loadGitignorePatterns(): Promise<string[]> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) {
+      return [];
+    }
+    
+    try {
+      const content = await fs.promises.readFile(path.join(root, '.gitignore'), 'utf8');
+      return content
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#'));
+    } catch {
+      return [];
+    }
+  }
+
+  private isIgnored(filePath: string, patterns: string[]): boolean {
+    // Simple pattern match for .gitignore
+    return patterns.some(p => {
+      const normalizedP = p.startsWith('/') ? p.slice(1) : p;
+      return filePath.startsWith(normalizedP) || filePath.includes(normalizedP);
     });
   }
+
 
   /**
    * Index a single entry directly (for testing or manual ingestion).
    * Non-blocking.
    */
-  indexEntry(entry: Omit<MemoryEntry, 'id' | 'vector' | 'updatedAt'>): void {
+  indexEntry(entry: Omit<MemoryEntry, 'id' | 'vector' | 'timestamp'>): void {
     if (!this.initialised) { return; }
     queueMicrotask(() => {
       this.computeAndStore(entry).catch(() => { /* silent */ });
@@ -168,12 +292,14 @@ export class MemoryManager implements vscode.Disposable {
   /**
    * Find the `topK` most relevant memory entries for a query string.
    * Uses cosine similarity against in-memory vectors.
-   * Falls back to keyword overlap if the in-memory index is empty.
+   * @returns A sorted list of results.
    */
-  search(query: string, topK: number = DEFAULT_TOP_K): MemorySearchResult[] {
-    if (this.index.size === 0) { return []; }
+  async search(query: string, topK: number = DEFAULT_TOP_K): Promise<MemorySearchResult[]> {
+    if (this.index.size === 0) {
+      return [];
+    }
 
-    const queryVec = hashEmbed(query);
+    const queryVec = await this.computeVector(query);
     const scored: MemorySearchResult[] = [];
 
     for (const entry of this.index.values()) {
@@ -194,13 +320,172 @@ export class MemoryManager implements vscode.Disposable {
   buildContext(results: MemorySearchResult[]): string {
     if (results.length === 0) { return ''; }
     const lines = results.map(r =>
-      `// ${r.entry.filePath}:${r.entry.startLine}-${r.entry.endLine} ` +
+      `// ${r.entry.filePath ?? 'unknown'}:${r.entry.startLine ?? 0}-${r.entry.endLine ?? 0} ` +
       `[score=${r.score.toFixed(2)}] ${r.entry.description}\n${r.entry.content}`
     );
     return `// === Retrieved Memory Context ===\n${lines.join('\n\n')}\n// ===`;
   }
 
-  getStats(): MemoryStats {
+  /**
+   * Analyzes the current index to discover implicit relations between chunks.
+   * Uses a combination of name-matching and structural heuristics to build a knowledge graph.
+   */
+  async discoverRelations(): Promise<void> {
+    const entries = Array.from(this.index.values());
+    const nameToIdMap = new Map<string, string>();
+
+    // First pass: map names to IDs for fast lookup
+    for (const entry of entries) {
+      if (entry.description) {
+        nameToIdMap.set(entry.description.split(' ')[0].replace(/[^a-zA-Z0-9_]/g, ''), entry.id);
+      }
+    }
+
+    for (const entry of entries) {
+      const relations: Array<{ type: string; targetId: string }> = [];
+      const content = entry.content;
+
+      // 1. Detect Imports (File-level relations)
+      const importRegex = /(?:import|require)\s*\(?['"]([^'"]+)['"]\)?/g;
+      let match;
+      while ((match = importRegex.exec(content)) !== null) {
+        const importedPath = match[1];
+        const target = entries.find(e => e.filePath?.includes(importedPath));
+        if (target) {
+          relations.push({ type: 'imports', targetId: target.id });
+        }
+      }
+
+      // 2. Detect Calls/Mentions (Entity-level relations)
+      for (const [name, id] of nameToIdMap.entries()) {
+         if (entry.id === id) {
+           continue;
+         }
+        
+        // Look for the name followed by an open paren (function call) or just the name as a token
+        const callRegex = new RegExp(`\\b${name}\\s*\\(`, 'g');
+        if (callRegex.test(content)) {
+          relations.push({ type: 'calls', targetId: id });
+        } else if (content.includes(name)) {
+          relations.push({ type: 'mentions', targetId: id });
+        }
+      }
+
+      // 3. Detect Inheritance (Class-level relations)
+      const extendsRegex = /extends\s+([a-zA-Z0-9_]+)/g;
+      while ((match = extendsRegex.exec(content)) !== null) {
+        const baseClass = match[1];
+        const targetId = nameToIdMap.get(baseClass);
+        if (targetId) {
+          relations.push({ type: 'extends', targetId });
+        }
+      }
+
+      if (relations.length > 0) {
+        // Remove duplicate relations
+        const uniqueRelations = Array.from(new Map(relations.map(r => [r.type + r.targetId, r])).values());
+        this.index.set(entry.id, { ...entry, relations: uniqueRelations });
+        this.dirty.add(entry.id);
+      }
+    }
+    
+    await this.persistState();
+    this.flushDirtyAsync();
+  }
+
+  /**
+   * Performs a health check on the knowledge base.
+   * Identifies orphans, contradictions, and outdated entries.
+   */
+  async lintMemory(): Promise<{ orphans: string[]; contradictions: string[][]; outdated: string[] }> {
+    const entries = Array.from(this.index.values());
+    const referencedIds = new Set<string>();
+    const contradictions: string[][] = [];
+    const outdated: string[] = [];
+    
+    // 1. Track all references for orphan detection
+    for (const entry of entries) {
+      for (const rel of entry.relations) {
+        referencedIds.add(rel.targetId);
+      }
+    }
+
+    // 2. Detect Contradictions and Outdated entries
+    const coordMap = new Map<string, string>(); // "path:line" -> id
+
+     for (const entry of entries) {
+       const coord = `${entry.filePath ?? 'unknown'}:${entry.startLine}`;
+       if (coordMap.has(coord)) {
+        const otherId = coordMap.get(coord)!;
+        if (otherId !== entry.id) {
+          contradictions.push([entry.id, otherId]);
+        }
+      } else {
+        coordMap.set(coord, entry.id);
+      }
+
+      // Check if entry is actually still present in the file (Freshness check)
+      try {
+       const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+       if (root && entry.filePath) {
+         const fullPath = path.join(root, entry.filePath);
+         const content = await fs.promises.readFile(fullPath, 'utf8');
+         // If the content at that line has changed significantly, mark as outdated
+          // (Simplified: just check if the chunk still exists as a substring)
+          if (!content.includes(entry.content.slice(0, 100))) {
+            outdated.push(entry.id);
+          }
+        }
+      } catch {
+        outdated.push(entry.id); // File deleted or unreadable
+      }
+    }
+
+    // 3. Identify Orphans
+    // An orphan is not referenced AND is not the first chunk of any file
+    const orphans = entries
+      .filter(e => {
+        const isReferenced = referencedIds.has(e.id);
+        const isRoot = e.startLine === 1; 
+        return !isReferenced && !isRoot;
+      })
+      .map(e => e.id);
+
+    return { orphans, contradictions, outdated };
+  }
+
+  /**
+   * Prunes identified problematic entries from the memory store.
+   */
+  async pruneMemory(ids: string[]): Promise<void> {
+    for (const id of ids) {
+      this.index.delete(id);
+    }
+    this.dirty.add('COMPACT'); // Trigger a full rewrite
+    await this.persistState();
+    this.flushDirtyAsync();
+  }
+
+  /**
+   * Store a discovered capability (e.g., "ripgrep is installed") into LTM.
+   */
+  async storeCapability(tool: string, version: string): Promise<void> {
+    const id = `cap_${tool}`;
+    const content = `Tool ${tool} is installed. Version: ${version}`;
+    const vector = await this.computeVector(content);
+
+    this.index.set(id, {
+      id,
+      type: 'capability',
+      description: `Capability: ${tool}`,
+      content,
+      vector,
+      relations: [],
+      timestamp: Date.now()
+    });
+    this.dirty.add(id);
+  }
+  public getStats(): MemoryStats {
     return {
       totalEntries: this.index.size,
       storePathExists: this.storePath !== '' && fs.existsSync(this.storePath),
@@ -212,7 +497,11 @@ export class MemoryManager implements vscode.Disposable {
   // Private: async indexing pipeline
   // -------------------------------------------------------------------------
 
-  private async indexPatchesAsync(
+  /**
+   * Index specifically changed files from patches.
+   * Non-blocking.
+   */
+  async indexPatches(
     patches: readonly Patch[],
     workspaceRoot: string
   ): Promise<void> {
@@ -230,17 +519,19 @@ export class MemoryManager implements vscode.Disposable {
                           ?? hashEmbed(mod.content);
 
         const id = stableId(patch.path, mod.startLine);
-        const entry: MemoryEntry = {
-          id,
-          filePath: patch.path,
-          startLine: mod.startLine,
-          endLine: mod.endLine,
-          content: mod.content.slice(0, 1_500),   // cap stored size
-          description,
-          refs: [],
-          vector: embedding,
-          updatedAt: Date.now()
-        };
+         const entry: MemoryEntry = {
+           id,
+           type: 'LTM',
+           filePath: patch.path,
+           startLine: mod.startLine,
+           endLine: mod.endLine,
+           description,
+           content: mod.content.slice(0, 1_500),   // cap stored size
+           relations: [],
+           vector: embedding,
+           timestamp: Date.now()
+         };
+
 
         this.index.set(id, entry);
         this.dirty.add(id);
@@ -262,9 +553,10 @@ export class MemoryManager implements vscode.Disposable {
           role: 'user',
           content: `Describe in one sentence what this code does:\n\n${content.slice(0, 400)}`
         }],
-        stream: false,
-        options: { temperature: 0.1, num_predict: 60 }
-      });
+         stream: false,
+         // eslint-disable-next-line @typescript-eslint/naming-convention
+         options: { temperature: 0.1, num_predict: 60 }
+       });
       const raw = await postJson(`${baseUrl}/api/chat`, body, 6_000);
       const data = JSON.parse(raw) as { message?: { content?: string } };
       return data.message?.content?.trim().split('\n')[0] ?? extractFirstComment(content);
@@ -274,19 +566,42 @@ export class MemoryManager implements vscode.Disposable {
   }
 
   private async computeAndStore(
-    partial: Omit<MemoryEntry, 'id' | 'vector' | 'updatedAt'>
+    partial: Omit<MemoryEntry, 'id' | 'vector' | 'timestamp'>
   ): Promise<void> {
-    const cfg     = vscode.workspace.getConfiguration('ollamaCopilot');
-    const baseUrl = cfg.get<string>('apiUrl') ?? 'http://localhost:11434';
-    const vector  = await ollamaEmbed(partial.description + '\n' + partial.content, baseUrl)
-                  ?? hashEmbed(partial.content);
-    const id      = stableId(partial.filePath, partial.startLine);
-    this.index.set(id, { ...partial, id, vector, updatedAt: Date.now() });
+    const vector = await this.computeVector(partial.content);
+    const filePath = partial.filePath ?? 'unknown';
+    const startLine = partial.startLine ?? 1;
+    const id = stableId(filePath, startLine);
+    this.index.set(id, { ...partial, id, vector, timestamp: Date.now() });
     this.dirty.add(id);
   }
 
+  private async computeVector(text: string): Promise<number[]> {
+    try {
+      const cfg = vscode.workspace.getConfiguration('ollamaCopilot');
+      const baseUrl = cfg.get<string>('apiUrl') ?? 'http://localhost:11434';
+      const embedModel = cfg.get<string>('embeddingModel') ?? DEFAULT_EMBED_MODEL;
+      
+      const body = JSON.stringify({ 
+        model: embedModel, 
+        prompt: text.slice(0, 2000) 
+      });
+      
+      const raw = await postJson(`${baseUrl}/api/embeddings`, body, 8000);
+      const data = JSON.parse(raw) as { embedding?: number[] };
+      const vec = data.embedding;
+      
+      if (Array.isArray(vec) && vec.length > 0) {
+        return normalizeArr(vec);
+      }
+    } catch (err) {
+      console.error('[MemoryManager] Embedding error, falling back to hash:', err);
+    }
+    return hashEmbed(text);
+  }
+
   // -------------------------------------------------------------------------
-  // Private: persistence (JSONL)
+  // Private: persistence (JSON)
   // -------------------------------------------------------------------------
 
   private async ensureStoreDir(): Promise<void> {
@@ -295,6 +610,16 @@ export class MemoryManager implements vscode.Disposable {
       // Add .gitignore entry in the parent directory if not present
       await ensureGitignored(path.dirname(this.storePath));
     } catch { /* already exists or permission denied – continue */ }
+  }
+
+  private async loadState(): Promise<void> {
+    try {
+      const file = path.join(this.storePath, LTM_FILE);
+      const raw = await fs.promises.readFile(file, 'utf8');
+      const state = JSON.parse(raw);
+      this.memoryMap = state.memoryMap ?? {};
+      this.vectorIndex = state.vectorIndex ?? null;
+    } catch { /* file not found or corrupt – start fresh */ }
   }
 
   private async loadFromDisk(): Promise<void> {
@@ -473,7 +798,12 @@ function postJson(url: string, body: string, timeoutMs: number): Promise<string>
         port: parsed.port || (isHttps ? 443 : 80),
         path: parsed.pathname,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+         headers: { 
+           // eslint-disable-next-line @typescript-eslint/naming-convention
+           'Content-Type': 'application/json', 
+           // eslint-disable-next-line @typescript-eslint/naming-convention
+           'Content-Length': Buffer.byteLength(body) 
+         },
         timeout: timeoutMs
       },
       res => {

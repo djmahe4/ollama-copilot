@@ -70,17 +70,18 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider {
       if (!this.ollamaClientModule) {
         this.ollamaClientModule = await import('../ollama/client');
       }
-      const { OllamaClient } = this.ollamaClientModule;
+       const { OllamaClient: ollamaClient } = this.ollamaClientModule;
 
       if (token.isCancellationRequested) { return null; }
 
       const context = this.buildContext(document, position);
-      const client  = new OllamaClient(apiUrl, model);
+       const client  = new ollamaClient(apiUrl, model);
 
-      const completion = await client.chat(
-        [{ role: 'user', content: context }],
-        { temperature: temp, num_predict: MAX_COMPLETION_TOKENS }
-      );
+       const completion = await client.chat(
+         [{ role: 'user', content: context }],
+         // eslint-disable-next-line @typescript-eslint/naming-convention
+         { temperature: temp, num_predict: MAX_COMPLETION_TOKENS }
+       );
 
       if (!completion.trim() || token.isCancellationRequested) { return null; }
 

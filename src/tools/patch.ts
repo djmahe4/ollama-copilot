@@ -67,7 +67,7 @@ export class PatchTool {
   }
 
   /**
-   * Apply unified diff to content
+   * Apply unified diff to content with context verification
    */
   private applyUnifiedDiff(original: string, diff: string): string | null {
     try {
@@ -78,60 +78,65 @@ export class PatchTool {
       const result: string[] = [];
       let i = 0;
 
-      // Skip header lines (---, +++, @@)
-      while (i < diffLines.length && 
-             (diffLines[i].startsWith('---') || 
-              diffLines[i].startsWith('+++') || 
-              diffLines[i].startsWith('@@'))) {
-        
-        // Parse @@ line to get starting line number
-        if (diffLines[i].startsWith('@@')) {
-          const match = diffLines[i].match(/@@ -(\d+)/);
-          if (match) {
-            const startLine = parseInt(match[1], 10);
-            // Copy lines before the patch starts
-            while (currentLine < startLine - 1 && currentLine < lines.length) {
-              result.push(lines[currentLine]);
-              currentLine++;
-            }
-          }
-        }
-        i++;
-      }
-
-      // Process diff hunks
       while (i < diffLines.length) {
         const line = diffLines[i];
 
+        if (line.startsWith('---') || line.startsWith('+++')) {
+          i++;
+          continue;
+        }
+
         if (line.startsWith('@@')) {
-          // New hunk
-          const match = line.match(/@@ -(\d+)/);
-          if (match) {
-            const startLine = parseInt(match[1], 10);
-            // Copy unchanged lines up to this point
-            while (currentLine < startLine - 1 && currentLine < lines.length) {
-              result.push(lines[currentLine]);
-              currentLine++;
-            }
+          // Parse hunk header: @@ -start,len +start,len @@
+          const match = line.match(/@@ -(\d+),?(\d+)? \+(\d+),?(\d+)? @@/);
+          if (!match) {
+            i++;
+            continue;
           }
-        } else if (line.startsWith('-')) {
-          // Line removed - skip it in original
-          currentLine++;
-        } else if (line.startsWith('+')) {
-          // Line added
-          result.push(line.substring(1));
-        } else if (line.startsWith(' ')) {
-          // Context line - keep it
-          result.push(line.substring(1));
-          currentLine++;
-        } else if (line.trim() === '') {
-          // Empty line
-          if (currentLine < lines.length) {
+
+          const oldStart = parseInt(match[1], 10);
+          // currentLine is 0-indexed, oldStart is 1-indexed
+          
+          // 1. Sync currentLine to the start of the hunk
+          while (currentLine < oldStart - 1 && currentLine < lines.length) {
             result.push(lines[currentLine]);
             currentLine++;
           }
-        }
 
+          // 2. Process the hunk
+          i++;
+          while (i < diffLines.length && !diffLines[i].startsWith('@@')) {
+            const hunkLine = diffLines[i];
+            
+            if (hunkLine.startsWith(' ')) {
+              // Context line: MUST match original content
+              const contextContent = hunkLine.substring(1);
+              if (currentLine >= lines.length || lines[currentLine] !== contextContent) {
+                console.error(`Context mismatch at line ${currentLine + 1}: expected "${contextContent}" but found "${lines[currentLine]}"`);
+                return null; // Fail patch
+              }
+              result.push(lines[currentLine]);
+              currentLine++;
+            } else if (hunkLine.startsWith('-')) {
+              // Removed line: MUST match original content
+              const removedContent = hunkLine.substring(1);
+              if (currentLine >= lines.length || lines[currentLine] !== removedContent) {
+                console.error(`Content mismatch at line ${currentLine + 1}: expected to remove "${removedContent}" but found "${lines[currentLine]}"`);
+                return null; // Fail patch
+              }
+              currentLine++;
+            } else if (hunkLine.startsWith('+')) {
+              // Added line: just push to result
+              result.push(hunkLine.substring(1));
+            } else {
+              // Unexpected line format within hunk
+              i++;
+              continue;
+            }
+            i++;
+          }
+          continue; // Outer loop will increment i if we didn't continue
+        }
         i++;
       }
 

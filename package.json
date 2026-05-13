@@ -183,7 +183,10 @@
               },
               "transport": {
                 "type": "string",
-                "enum": ["sse", "stdio"],
+                "enum": [
+                  "sse",
+                  "stdio"
+                ],
                 "default": "sse",
                 "description": "Transport protocol for this MCP server"
               },
@@ -193,7 +196,10 @@
                 "description": "Whether this MCP server is active"
               }
             },
-            "required": ["name", "url"]
+            "required": [
+              "name",
+              "url"
+            ]
           }
         },
         "llamaACoder.mcpAutoDiscover": {
@@ -205,6 +211,11 @@
           "type": "boolean",
           "default": true,
           "description": "Prefer Context7 MCP for real-time documentation lookups when available"
+        },
+        "ollamaCopilot.debugMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable advanced debugging: logs terminal output to files, indexes logs into memory, and enables surgical reading (head/tail/grep)"
         }
       }
     }
@@ -214,16 +225,20 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
+    "test": "jest",
     "lint": "eslint src --ext ts",
     "package": "vsce package --allow-missing-repository"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.75.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/vsce": "^3.7.1",
     "eslint": "^10.0.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.9",
     "typescript": "^5.0.0"
   }
 }
