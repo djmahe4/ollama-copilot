@@ -239,11 +239,11 @@ function makeGetRequest(url: string): Promise<string> {
         method: 'GET',
         timeout: 5_000
       },
-      res => {
-        let body = '';
-        res.on('data', (c: Buffer) => { body += c.toString(); });
-        res.on('end', () => { resolve(body); });
-      }
+       res => {
+         const chunks: Buffer[] = [];
+         res.on('data', (c: Buffer) => { chunks.push(c); });
+         res.on('end', () => { resolve(Buffer.concat(chunks).toString('utf8')); });
+       }
     );
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });

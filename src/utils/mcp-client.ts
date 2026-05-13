@@ -11,6 +11,7 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
 import * as https from 'https';
+import * as cp from 'child_process';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,6 +56,7 @@ interface McpServerEntry {
   readonly config: McpServerConfig;
   tools: McpToolDefinition[];
   reachable: boolean;
+  process?: cp.ChildProcess;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +120,11 @@ export class McpClientManager {
 
   /** Release all held resources. */
   dispose(): void {
+    for (const entry of this.servers.values()) {
+      if (entry.process) {
+        entry.process.kill();
+      }
+    }
     for (const d of this.disposables) {
       d.dispose();
     }
@@ -350,14 +357,68 @@ export class McpClientManager {
    * SSE transport: POST to /tools/<name> with JSON body.
    * stdio transport: stub – not yet implemented.
    */
-  private dispatchToolCall(
+  private async dispatchToolCall(
     config: McpServerConfig,
     call: McpToolCall
   ): Promise<unknown> {
     if (config.transport === 'stdio') {
-      return Promise.reject(new Error('stdio MCP transport is not yet implemented'));
+      return this.dispatchStdioCall(config, call);
     }
     return this.postJson(`${config.url}/tools/${encodeURIComponent(call.tool)}`, call.params);
+  }
+
+  private async dispatchStdioCall(config: McpServerConfig, call: McpToolCall): Promise<unknown> {
+    const entry = this.servers.get(config.name);
+    if (!entry) throw new Error('Server entry not found');
+
+    if (!entry.process) {
+      // Spawn the server process
+      // config.url is used as the command for stdio
+      entry.process = cp.spawn(config.url, { shell: true });
+    }
+
+    return new Promise((resolve, reject) => {
+      const request = {
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'tools/call',
+        params: {
+          name: call.tool,
+          arguments: call.params
+        }
+      };
+
+      const process = entry.process;
+      if (!process || !process.stdin || !process.stdout) {
+        return reject(new Error('MCP process not spawned or streams missing'));
+      }
+
+      process.stdin.write(JSON.stringify(request) + '\n');
+
+      const onData = (data: Buffer) => {
+        try {
+          const response = JSON.parse(data.toString());
+          if (response.id === request.id) {
+            process.stdout?.removeListener('data', onData);
+            if (response.error) {
+              reject(new Error(response.error));
+            } else {
+              resolve(response.result);
+            }
+          }
+        } catch {
+          // Ignore partial JSON or malformed responses
+        }
+      };
+
+      process.stdout.on('data', onData);
+      
+      // Timeout
+      setTimeout(() => {
+        process.stdout?.removeListener('data', onData);
+        reject(new Error('MCP stdio call timed out'));
+      }, 30_000);
+    });
   }
 
   /** POST JSON to a URL and return the parsed response body. */

@@ -108,12 +108,12 @@ interface GitignorePattern {
  * Negation patterns (`!`) are intentionally skipped for simplicity.
  * Returns an empty rule set when no .gitignore is found.
  */
-export function loadGitignoreRules(workspaceRoot: string): GitignoreRules {
+export async function loadGitignoreRules(workspaceRoot: string): Promise<GitignoreRules> {
   const rawPatterns: string[] = [];
 
-  const collectFrom = (filePath: string, prefix: string): void => {
+  const collectFrom = async (filePath: string, prefix: string): Promise<void> => {
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
+      const content = await fs.promises.readFile(filePath, 'utf8');
       for (const rawLine of content.split(/\r?\n/)) {
         const line = rawLine.trim();
         if (!line || line.startsWith('#') || line.startsWith('!')) { continue; }
@@ -124,16 +124,18 @@ export function loadGitignoreRules(workspaceRoot: string): GitignoreRules {
   };
 
   // Root .gitignore
-  collectFrom(path.join(workspaceRoot, '.gitignore'), '');
+  await collectFrom(path.join(workspaceRoot, '.gitignore'), '');
 
   // Nested .gitignore files one level deep
   try {
-    for (const entry of fs.readdirSync(workspaceRoot)) {
+    const entries = await fs.promises.readdir(workspaceRoot);
+    for (const entry of entries) {
       if (ALWAYS_EXCLUDED.has(entry)) { continue; }
       const sub = path.join(workspaceRoot, entry);
       try {
-        if (fs.statSync(sub).isDirectory()) {
-          collectFrom(path.join(sub, '.gitignore'), entry);
+        const stat = await fs.promises.stat(sub);
+        if (stat.isDirectory()) {
+          await collectFrom(path.join(sub, '.gitignore'), entry);
         }
       } catch { /* stat failed – skip */ }
     }
@@ -208,7 +210,7 @@ export async function ragSearch(
   }
 
   const skipGitignore = options.ignoreGitignore === true;
-  const rules = skipGitignore ? { patterns: [], compiled: [] } : loadGitignoreRules(workspaceRoot);
+  const rules = skipGitignore ? { patterns: [], compiled: [] } : await loadGitignoreRules(workspaceRoot);
 
   // 1. ripgrep – honours .gitignore automatically unless overridden
   const rgResult = await tryRipgrep(workspaceRoot, sanitised, skipGitignore);
@@ -278,7 +280,7 @@ export function splitIntoModules(sourceCode: string): SplitModule[] {
   };
 
   const EXPORT_RE =
-    /^export\s+(?:default\s+)?(?:class|function|const|interface|type|enum)\s+(\w+)/;
+    /^export\s+(?:default\s+)?(?:async\s+)?(?:class|function|const|interface|type|enum)\s+(\w+)/;
 
   for (let i = 0; i < lines.length; i++) {
     const m = EXPORT_RE.exec(lines[i]);
@@ -550,5 +552,5 @@ function pathContainsExcluded(filePath: string, excluded: Set<string>): boolean 
 
 /** Strip shell metacharacters to prevent injection (technique 22). */
 function sanitiseQuery(query: string): string {
-  return query.replace(/[`$;&|><!()\[\]{}\\'"]/g, '').trim().slice(0, 200);
+  return query.replace(/[\`$;&|!\']/g, '').trim().slice(0, 200);
 }

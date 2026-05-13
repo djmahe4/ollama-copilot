@@ -103,7 +103,7 @@ export class PlanManager {
     const structureResult = await this.workspace.getWorkspaceStructure();
     const rawContext = structureResult.data ?? '';
     const chunks = chunkByTokens(rawContext, MAX_CONTEXT_TOKENS);
-    const context = compressPrompt(chunks[0]?.content ?? rawContext);
+    const context = compressPrompt(chunks.map(c => c.content).join('\n') || rawContext);
 
     // Generate branch ideas in a single call to save latency
     const ideasPrompt = buildIdeasPrompt(userRequest, context);
