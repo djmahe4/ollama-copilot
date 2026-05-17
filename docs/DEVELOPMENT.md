@@ -11,24 +11,28 @@ ollama-copilot/
 │   └── tasks.json           # Build tasks
 ├── resources/
 │   └── icon.svg            # Extension icon
-├── src/
-│   ├── extension.ts         # Main entry point & orchestration
-│   ├── agents/
-│   │   ├── planner.ts      # Planning agent
-│   │   ├── coder.ts        # Code generation agent
-│   │   └── tester.ts       # Testing & fixing agent
-│   ├── ollama/
-│   │   └── client.ts       # Ollama AI client
-│   ├── protocol/
-│   │   ├── types.ts        # TypeScript interfaces
-│   │   └── prompts.ts      # System prompts for agents
-│   ├── tools/
-│   │   ├── workspace.ts    # File operations
-│   │   ├── search.ts       # Code search
-│   │   ├── patch.ts        # Diff generation & application
-│   │   └── terminal.ts     # Command execution
-│   └── ui/
-│       └── panel.ts        # Webview UI
+  ├── src/
+  │   ├── extension.ts         # Main entry point & orchestration
+  │   ├── agents/
+  │   │   ├── planner.ts      # Planning agent
+  │   │   ├── coder.ts        # Code generation agent
+  │   │   └── tester.ts       # Testing & fixing agent
+  │   ├── ollama/
+  │   │   └── client.ts       # Ollama AI client
+  │   ├── protocol/
+  │   │   ├── types.ts        # TypeScript interfaces
+  │   │   └── prompts.ts      # System prompts for agents
+  │   ├── tools/
+  │   │   ├── workspace.ts    # File operations
+  │   │   ├── search.ts       # Code search
+  │   │   ├── patch.ts        # Diff generation & application
+  │   │   └── terminal.ts     # Command execution
+  │   ├── utils/
+  │   │   ├── memory-manager.ts # Hybrid LTM/STM memory system
+  │   │   └── modular-splitter.ts # AST-lite code chunking
+  │   └── ui/
+  │       └── panel.ts        # Webview UI
+
 ├── package.json            # Extension manifest
 ├── tsconfig.json          # TypeScript configuration
 ├── .eslintrc.json        # Linting rules
@@ -94,18 +98,29 @@ Features:
 - Applies unified diff format
 - Safe validation before writing
 
-#### Terminal Tool (tools/terminal.ts)
-Operations:
-- `runCommand(cmd)` - Execute whitelisted command
-- `runTests()` - Auto-detect and run tests
-- `runBuild()` - Auto-detect and run build
+  #### Terminal Tool (tools/terminal.ts)
+  Operations:
+  - `runCommand(cmd)` - Execute whitelisted command
+  - `runTests()` - Auto-detect and run tests
+  - `runBuild()` - Auto-detect and run build
+  
+  Security:
+  - Command whitelist enforcement
+  - 60-second timeout
+  - 10MB output buffer limit
+  
+  ### 4. Memory System (utils/memory-manager.ts)
+  
+  Implements a compounding knowledge base for the agent:
+  - **LTM (Long-Term Memory)**: Persistent, vectorized index of the workspace.
+  - **STM (Short-Term Memory)**: Session-specific cache for current tasks.
+  - **Knowledge Compilation**: Indexes codebase using a modular splitting strategy.
+  - **Semantic Search**: Uses Ollama embeddings to retrieve precise code context.
+  - **Relation Graph**: Automatically maps imports, function calls, and class inheritance.
+  - **Self-Healing**: Linting and pruning for orphans, contradictions, and outdated entries.
+  
+  ### 5. Ollama Client (ollama/client.ts)
 
-Security:
-- Command whitelist enforcement
-- 60-second timeout
-- 10MB output buffer limit
-
-### 4. Ollama Client (ollama/client.ts)
 
 HTTP client for Ollama API:
 - `chat(messages)` - Non-streaming completion
@@ -246,24 +261,43 @@ const messages = [
 ];
 ```
 
-### Adding UI Actions
+  ### Adding UI Actions
+  
+  1. Add button to webview HTML in `panel.ts`
+  2. Add click handler that posts message:
+  ```javascript
+  myBtn.addEventListener('click', () => {
+    vscode.postMessage({ command: 'myAction', data });
+  });
+  ```
+  
+  3. Handle in extension:
+  ```typescript
+  case 'myAction':
+    await this.handleMyAction(message.data);
+    break;
+  ```
+  
+  ## Workspace Knowledge Management
+  
+  The extension maintains a local knowledge base in `.ollama-agentic/memory/`.
+  
+  ### Re-Indexing
+  To force a re-compilation of the knowledge base:
+  - Run command: `Llama A Coder: Index Workspace`
+  - Use **Debug Mode** to override `.gitignore` and scan all matching files.
+  
+  ### Memory Maintenance
+  To ensure the index remains high-signal:
+  - Run command: `Llama A Coder: Lint Memory`
+  - The system will identify:
+    - **Orphans**: Unreferenced chunks.
+    - **Contradictions**: Duplicate entries for the same code location.
+    - **Outdated**: Chunks that no longer match the file on disk.
+  - Select "Prune Now" to remove these entries.
+  
+  ## Best Practices
 
-1. Add button to webview HTML in `panel.ts`
-2. Add click handler that posts message:
-```javascript
-myBtn.addEventListener('click', () => {
-  vscode.postMessage({ command: 'myAction', data });
-});
-```
-
-3. Handle in extension:
-```typescript
-case 'myAction':
-  await this.handleMyAction(message.data);
-  break;
-```
-
-## Best Practices
 
 ### Error Handling
 

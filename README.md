@@ -1,10 +1,270 @@
-# Ollama Copilot
+# Llama A Coder
 
-> 🤖 **An intelligent AI coding assistant powered by local Ollama models**
+> 🦙 **A production-grade, fully local agentic coding assistant powered by Ollama**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![VS Code](https://img.shields.io/badge/VS%20Code-1.75+-blue.svg)](https://code.visualstudio.com/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue.svg)](https://www.typescriptlang.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/djmahe4/ollama-copilot)
+
+**Llama A Coder** (`djmahe4.llama-a-coder`) is a VS Code extension that brings a full agentic coding pipeline to your editor, running **entirely on your local machine** using [Ollama](https://ollama.ai).
+
+It is a structured evolution of [ollama-copilot](https://github.com/anandof28/ollama-copilot), extended with an agentic core, project-based embeddings memory, MCP server integration, 30 mandatory optimization techniques, and a complete target module structure — while preserving all upstream behaviour.
+
+---
+
+## ✨ What's New in v1.2.0
+
+| Area | What was added |
+|------|---------------|
+| **Agentic Core** | Tree-of-Thought planner, ReAct task orchestrator, multi-pass verifier, self-critique engine |
+| **Memory RAG** | Local file-based embeddings store (`.ollama-agentic/memory/`) with <100 ms vector search |
+| **MCP Support** | Independent MCP server discovery/registration; Context7 auto-detection |
+| **Ollama** | True hot-swap model switching, multi-model routing, streaming handler with cancellation |
+| **UI** | Status bar, quick-pick model selector, CSP-ready webview helpers, accessibility + i18n hooks |
+| **Commands** | `switchModel`, `generatePlan`, `executeTask`, `applyPatch`, `reviewChanges`, `manageMcpServers` |
+| **Providers** | Lazy inline completions, lightbulb code actions (fix / refactor / explain) |
+| **Cross-platform** | All search, file, and process operations work identically on Windows, macOS, Linux |
+
+---
+
+## 🚀 Features
+
+### 🧠 Three Intelligent Modes (upstream, preserved)
+
+- **💻 Code Mode** — Full Plan → Generate → Preview → Apply pipeline
+- **📋 Plan Mode** — Hierarchical implementation plan with Tree-of-Thought reasoning
+- **💬 Ask Mode** — Context-aware Q&A with workspace RAG
+
+### ⚙️ Agentic Pipeline
+
+```
+User Request
+    │
+    ▼
+PlanManager (Tree-of-Thought, 3 branches)
+    │
+    ▼
+TaskOrchestrator (ReAct loop, parallel safe batches)
+    │   ├── MemoryManager.search() ← pre-step context retrieval
+    │   └── OllamaClient.chat()    ← model call with memory context
+    ▼
+PatchApplier (dry-run validation → apply → MemoryManager.indexPatches())
+    │
+    ▼
+Verifier (spec-first + self-consistency, memory-augmented)
+    │
+    ▼
+SelfCritique (static security scan + LLM quality pass)
+```
+
+### 🗄️ Project-Based Embeddings Memory
+
+A fully local, zero-server vector store that learns your codebase:
+
+- **Storage**: `.ollama-agentic/memory/vectors.jsonl` (JSONL, git-ignored)
+- **Indexing**: After every successful patch, changed functions/variables are re-embedded and stored with precise line metadata
+- **Search**: Cosine similarity search in <100 ms against an in-memory index
+- **Embeddings**: Ollama `/api/embeddings` (e.g. `nomic-embed-text`) with automatic feature-hashing TF-IDF fallback — works even without a dedicated embedding model
+- **Non-blocking**: All writes use `queueMicrotask` + `setImmediate`; <50 ms overhead on the main pipeline
+- **Incremental**: Only changed modules are re-embedded (uses `splitIntoModules` for chunk-level granularity)
+
+### 🔌 MCP Server Support
+
+Connect any [Model Context Protocol](https://modelcontextprotocol.io) server for real-time docs and API lookup:
+
+- Auto-discover common servers (Context7 recommended)
+- stdio or SSE transport
+- All tool calls validated and sandboxed
+- Fallback to workspace RAG when no MCP is available
+
+### 🔍 Cross-Platform Workspace Search
+
+`ragSearch()` tries four strategies in order, so it always works:
+
+| # | Strategy | When used |
+|---|----------|-----------|
+| 1 | `rg` (ripgrep) | If installed; respects `.gitignore` automatically |
+| 2 | `grep -rn` | macOS / Linux built-in |
+| 2 | `findstr /S /N` | Windows built-in |
+| 3 | Pure Node.js walker | Always available; honours `.gitignore` |
+
+All strategies skip `.gitignore`-listed paths (venv, node_modules, dist, etc.).  
+Pass `{ ignoreGitignore: true }` to `ragSearch()` to override for debugging.
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+
+1. **VS Code** 1.75 or later
+2. **Ollama** running locally ([install guide](https://ollama.ai/download))
+3. A code model pulled, e.g.:
+   ```bash
+   ollama pull qwen2.5-coder:7b
+   ```
+4. _(Optional)_ An embedding model for enhanced memory search:
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+
+### Install from Marketplace
+
+Search for **Llama A Coder** in the VS Code Extensions panel, or:
+
+```bash
+code --install-extension djmahe4.llama-a-coder
+```
+
+### Install from Source
+
+```bash
+git clone https://github.com/djmahe4/ollama-copilot
+cd ollama-copilot
+npm install
+npm run compile
+# Press F5 in VS Code to launch the Extension Development Host
+```
+
+---
+
+## ⚙️ Configuration
+
+All settings are under `ollamaCopilot.*` and `llamaACoder.*`.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ollamaCopilot.apiUrl` | `http://localhost:11434` | Ollama API base URL |
+| `ollamaCopilot.model` | `qwen2.5-coder:7b` | Active code model |
+| `ollamaCopilot.temperature` | `0.1` | Model temperature |
+| `llamaACoder.embeddingModel` | `nomic-embed-text` | Embedding model for memory store |
+| `llamaACoder.mcpServers` | `[]` | MCP server configurations |
+| `llamaACoder.mcpAutoDiscover` | `true` | Auto-discover known MCP servers on activation |
+| `llamaACoder.mcpPreferContext7` | `true` | Prefer Context7 for documentation lookups |
+
+### MCP Server Example
+
+```jsonc
+// .vscode/settings.json
+{
+  "llamaACoder.mcpServers": [
+    {
+      "name": "context7",
+      "url": "https://mcp.context7.com/mcp",
+      "transport": "sse",
+      "enabled": true
+    }
+  ]
+}
+```
+
+---
+
+## 🎮 Commands
+
+| Command | Keybinding | Description |
+|---------|-----------|-------------|
+| `Llama A Coder: Switch Model` | — | Hot-swap the active Ollama model |
+| `Llama A Coder: Generate Plan` | — | Tree-of-Thought implementation plan |
+| `Llama A Coder: Execute Task` | — | Full Plan→Code→Patch pipeline |
+| `Llama A Coder: Apply Patch` | — | Apply staged patches to workspace |
+| `Llama A Coder: Review Changes` | — | Diff preview + SelfCritique analysis |
+| `Llama A Coder: Manage MCP Servers` | — | View/manage connected MCP servers |
+
+All upstream commands (`ollama-copilot.*`) remain fully functional.
+
+---
+
+## 🏗️ Architecture
+
+```
+src/
+├── agentic-core/
+│   ├── plan-manager.ts       ← Tree-of-Thought planner (wraps upstream PlannerAgent)
+│   ├── task-orchestrator.ts  ← ReAct loop + parallel batching + memory context
+│   ├── patch-applier.ts      ← Validated patch apply + memory indexing trigger
+│   ├── verifier.ts           ← Spec-first + self-consistency + memory context
+│   └── self-critique.ts      ← Static security scan + LLM quality passes
+├── ollama/
+│   ├── client.ts             ← Upstream (unchanged)
+│   ├── model-manager.ts      ← Multi-model routing + hot-swap + rate limiting
+│   └── streaming-handler.ts  ← Cancellable streaming, memory-safe, retry
+├── ui/
+│   ├── sidebar-provider.ts   ← Composes ChatViewProvider + StatusBar
+│   ├── chat-webview.ts       ← CSP nonces, HTML escaping, ARIA, i18n helpers
+│   ├── status-bar.ts         ← Lazy-loaded status bar item
+│   └── quick-pick-models.ts  ← Model picker with hot-swap
+├── commands/                 ← One file per command (switch-model, generate-plan, …)
+├── providers/
+│   ├── completion-provider.ts  ← Lazy inline completions, debounced
+│   └── code-action-provider.ts ← Fix / Refactor / Explain lightbulb actions
+└── utils/
+    ├── memory-manager.ts     ← ★ Embeddings RAG store (JSONL, cosine search)
+    ├── mcp-client.ts         ← MCP server discovery + tool-call gateway
+    ├── modular-splitter.ts   ← Cross-platform RAG search + code splitting
+    ├── optimization-engine.ts← Chunking, prompt compression, instrumentation
+    ├── diff-utils.ts         ← Git-friendly minimal diff helpers
+    └── safe-fs.ts            ← Path-traversal-safe file I/O
+```
+
+---
+
+## 🛡️ Security
+
+- No `eval()`, `innerHTML` assignment, or dynamic code execution
+- All file paths validated against workspace root (path-traversal prevention)
+- Content Security Policy nonces on all webview HTML
+- Input sanitised before any shell-adjacent operation
+- Untrusted workspace guard on completion and code-action providers
+- All MCP tool calls validated and sandboxed
+
+---
+
+## 🔧 30 Optimization Techniques
+
+Every module implements a subset of the mandatory optimization techniques:
+
+| # | Technique | Where |
+|---|-----------|-------|
+| 1 | Context-window chunking | `optimization-engine`, `plan-manager` |
+| 2 | Prompt compression | `optimization-engine`, `plan-manager`, `self-critique` |
+| 3 | Spec-first development | `verifier` |
+| 4 | Tree-of-Thought reasoning | `plan-manager` |
+| 5 | ReAct loop | `task-orchestrator` |
+| 6 | Self-consistency | `verifier`, `self-critique` |
+| 7 | Workspace RAG | `modular-splitter`, `memory-manager` |
+| 8 | Dependency injection | all agentic-core modules |
+| 9 | Performance instrumentation | `optimization-engine` (spans) |
+| 10 | Memory leak prevention | `streaming-handler`, `sidebar-provider`, `memory-manager` |
+| 11 | Immutable data structures | all result types |
+| 12 | Zero-allocation critical paths | `streaming-handler` |
+| 13 | Lazy loading | `status-bar`, `completion-provider` |
+| 14 | Dynamic imports | `completion-provider`, `code-action-provider` |
+| 15 | Retry + exponential backoff | `task-orchestrator`, `model-manager`, `streaming-handler` |
+| 16 | Rate limiting | `task-orchestrator`, `model-manager` |
+| 17 | Multi-model routing | `model-manager` |
+| 18 | Automatic code splitting | `modular-splitter` |
+| 19 | Barrel exports | `*/index.ts` files |
+| 20 | Strict type guards | `self-critique`, `code-action-provider` |
+| 21 | Exhaustive switch/case | `self-critique`, `code-action-provider`, `chat-webview` |
+| 22 | Security validation | `safe-fs`, `self-critique`, `modular-splitter` |
+| 23 | CSP-ready patterns | `chat-webview` |
+| 24 | Accessibility hooks | `chat-webview`, `sidebar-provider` |
+| 25 | Internationalization | `chat-webview`, `status-bar`, `quick-pick-models` |
+| 26 | Git-friendly minimal diffs | `diff-utils`, `patch-applier` |
+| 27 | Incremental compilation | `tsconfig.json` (`incremental: true`) |
+| 28 | Parallel task execution | `task-orchestrator` |
+| 29 | Auto documentation generation | `optimization-engine` |
+| 30 | Dead code elimination awareness | `optimization-engine` (export registry) |
+
+---
+
+## 📄 License
+
+MIT © [djmahe4](https://github.com/djmahe4)
+
+Upstream work © [anandof28](https://github.com/anandof28/ollama-copilot) — MIT
 
 Ollama Copilot is a VS Code extension that brings GitHub Copilot-like AI assistance directly to your editor, running **entirely on your local machine** using [Ollama](https://ollama.ai). Unlike simple chat extensions, this is a full **agentic system** with multi-mode support for planning, coding, and Q&A.
 

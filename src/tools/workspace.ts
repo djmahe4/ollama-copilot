@@ -44,11 +44,26 @@ export class WorkspaceTool {
   }
 
   /**
+   * Resolve a relative path to an absolute path and verify it's within the workspace root.
+   */
+  private resolveSafePath(relativePath: string): string {
+    const fullPath = path.resolve(this.workspaceRoot, relativePath);
+    const rootWithSlash = this.workspaceRoot.endsWith(path.sep) 
+      ? this.workspaceRoot 
+      : this.workspaceRoot + path.sep;
+    
+    if (fullPath !== this.workspaceRoot && !fullPath.startsWith(rootWithSlash)) {
+      throw new Error(`Access denied: Path ${relativePath} is outside workspace root`);
+    }
+    return fullPath;
+  }
+
+  /**
    * Read file contents
    */
   async readFile(relativePath: string): Promise<ToolResult<string>> {
     try {
-      const fullPath = path.join(this.workspaceRoot, relativePath);
+      const fullPath = this.resolveSafePath(relativePath);
       const content = await fs.readFile(fullPath, 'utf-8');
       
       return {
@@ -68,7 +83,7 @@ export class WorkspaceTool {
    */
   async createFile(relativePath: string, content: string): Promise<ToolResult<void>> {
     try {
-      const fullPath = path.join(this.workspaceRoot, relativePath);
+      const fullPath = this.resolveSafePath(relativePath);
       const dir = path.dirname(fullPath);
       
       // Create directory if it doesn't exist
@@ -93,7 +108,7 @@ export class WorkspaceTool {
    */
   async writeFile(relativePath: string, content: string): Promise<ToolResult<void>> {
     try {
-      const fullPath = path.join(this.workspaceRoot, relativePath);
+      const fullPath = this.resolveSafePath(relativePath);
       await fs.writeFile(fullPath, content, 'utf-8');
       
       return {
@@ -112,7 +127,7 @@ export class WorkspaceTool {
    */
   async fileExists(relativePath: string): Promise<boolean> {
     try {
-      const fullPath = path.join(this.workspaceRoot, relativePath);
+      const fullPath = this.resolveSafePath(relativePath);
       await fs.access(fullPath);
       return true;
     } catch {
@@ -182,25 +197,53 @@ export class WorkspaceTool {
           const pkg = JSON.parse(pkgResult.data);
           const deps = { ...pkg.dependencies, ...pkg.devDependencies };
           
-          if (deps['react']) stack.push('React');
-          if (deps['vue']) stack.push('Vue');
-          if (deps['@angular/core']) stack.push('Angular');
-          if (deps['express']) stack.push('Express');
-          if (deps['next']) stack.push('Next.js');
-          if (deps['typescript']) stack.push('TypeScript');
-          if (deps['vite']) stack.push('Vite');
-          if (deps['webpack']) stack.push('Webpack');
+           if (deps['react']) {
+             stack.push('React');
+           }
+           if (deps['vue']) {
+             stack.push('Vue');
+           }
+           if (deps['@angular/core']) {
+             stack.push('Angular');
+           }
+           if (deps['express']) {
+             stack.push('Express');
+           }
+           if (deps['next']) {
+             stack.push('Next.js');
+           }
+           if (deps['typescript']) {
+             stack.push('TypeScript');
+           }
+           if (deps['vite']) {
+             stack.push('Vite');
+           }
+           if (deps['webpack']) {
+             stack.push('Webpack');
+           }
         }
       } catch {}
     }
 
     // Check file extensions
-    if (files.some(f => f.endsWith('.ts') || f.endsWith('.tsx'))) stack.push('TypeScript');
-    if (files.some(f => f.endsWith('.py'))) stack.push('Python');
-    if (files.some(f => f.endsWith('.go'))) stack.push('Go');
-    if (files.some(f => f.endsWith('.rs'))) stack.push('Rust');
-    if (files.some(f => f.endsWith('.java'))) stack.push('Java');
-    if (files.some(f => f.endsWith('.vue'))) stack.push('Vue');
+     if (files.some(f => f.endsWith('.ts') || f.endsWith('.tsx'))) {
+       stack.push('TypeScript');
+     }
+     if (files.some(f => f.endsWith('.py'))) {
+       stack.push('Python');
+     }
+     if (files.some(f => f.endsWith('.go'))) {
+       stack.push('Go');
+     }
+     if (files.some(f => f.endsWith('.rs'))) {
+       stack.push('Rust');
+     }
+     if (files.some(f => f.endsWith('.java'))) {
+       stack.push('Java');
+     }
+     if (files.some(f => f.endsWith('.vue'))) {
+       stack.push('Vue');
+     }
     
     return stack.length > 0 ? stack.join(', ') : 'Unknown';
   }

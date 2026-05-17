@@ -234,6 +234,60 @@ export class CopilotPanel {
       overflow-y: auto;
     }
 
+    .command-proposal {
+      margin-top: 16px;
+      padding: 16px;
+      background-color: var(--vscode-sideBar-background);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+    }
+
+    .command-proposal h3 {
+      font-size: 13px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .command-input-container {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .command-input {
+      flex: 1;
+      background-color: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    .memory-stats {
+      margin-top: 16px;
+      padding: 12px;
+      background-color: var(--vscode-sideBar-background);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      font-size: 12px;
+    }
+
+    .memory-stats h3 {
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+
+    .memory-stat-item {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      opacity: 0.8;
+    }
+
     .diff-file {
       margin-bottom: 20px;
     }
@@ -344,18 +398,21 @@ export class CopilotPanel {
     <p>Agentic coding assistant powered by local Ollama</p>
   </div>
 
-  <div class="container">
-    <div class="chat-container" id="chatContainer">
-      <div class="message system">
-        <div class="message-content">
-          Welcome to Ollama Copilot! Type your feature request below and click "Implement Feature" to get started.
+    <div class="container">
+      <div class="chat-container" id="chatContainer">
+        <div class="message system">
+          <div class="message-content">
+            Welcome to Ollama Copilot! Type your feature request below and click "Implement Feature" to get started.
+          </div>
         </div>
       </div>
-    </div>
 
-    <div id="diffPreview" class="hidden"></div>
+      <div id="commandProposal" class="hidden"></div>
+      <div id="memoryStats" class="hidden"></div>
+      <div id="diffPreview" class="hidden"></div>
 
-    <div class="input-container">
+      <div class="input-container">
+
       <div class="progress" id="progress"></div>
       
       <div class="input-row">
@@ -398,13 +455,21 @@ export class CopilotPanel {
         case 'showDiffPreview':
           showDiffPreview(message.patches);
           break;
+        case 'showCommandProposal':
+          showCommandProposal(message.command);
+          break;
+        case 'updateMemoryStats':
+          updateMemoryStats(message.stats);
+          break;
         case 'clearChat':
           clearChat();
           break;
+        }
       }
     });
 
     // Button handlers
+
     implementBtn.addEventListener('click', () => {
       const request = userInput.value.trim();
       if (!request) return;
@@ -444,10 +509,10 @@ export class CopilotPanel {
 
       const header = document.createElement('div');
       header.className = 'message-header';
-      header.innerHTML = \`
-        <span>\${type.toUpperCase()}</span>
-        <span>\${new Date(timestamp).toLocaleTimeString()}</span>
-      \`;
+       header.innerHTML = \`
+         <span>\${type.toUpperCase()}</span>
+         <span>\${new Date(timestamp).toLocaleTimeString()}</span>
+       \`;
 
       const contentDiv = document.createElement('div');
       contentDiv.className = 'message-content';
@@ -472,10 +537,10 @@ export class CopilotPanel {
       currentPatches = patches;
       
       diffPreview.className = '';
-      diffPreview.innerHTML = \`
-        <div class="diff-header">📝 Proposed Changes (\${patches.length} file\${patches.length !== 1 ? 's' : ''})</div>
-        <div class="diff-content" id="diffContent"></div>
-      \`;
+       diffPreview.innerHTML = \`
+         <div class="diff-header">📝 Proposed Changes (\${patches.length} file\${patches.length !== 1 ? 's' : ''})</div>
+         <div class="diff-content" id="diffContent"></div>
+       \`;
 
       const diffContent = document.getElementById('diffContent');
       
@@ -510,7 +575,63 @@ export class CopilotPanel {
       testBtn.disabled = false;
     }
 
+    function showCommandProposal(command) {
+      const proposalDiv = document.getElementById('commandProposal');
+      proposalDiv.className = '';
+      proposalDiv.innerHTML = \`
+        <div class="command-proposal">
+          <h3>🚀 Command Proposal</h3>
+          <div class="command-input-container">
+            <input type="text" id="proposedCmd" class="command-input" value="\${command}">
+          </div>
+          <div class="button-row">
+            <button id="runCmdBtn">Run Command</button>
+            <button id="cancelCmdBtn" class="secondary">Cancel</button>
+          </div>
+        </div>
+      \`;
+
+      document.getElementById('runCmdBtn').addEventListener('click', () => {
+        const finalCmd = document.getElementById('proposedCmd').value;
+        vscode.postMessage({
+          command: 'executeTerminalCommand',
+          command: finalCmd
+        });
+        proposalDiv.className = 'hidden';
+      });
+
+      document.getElementById('cancelCmdBtn').addEventListener('click', () => {
+        vscode.postMessage({
+          command: 'cancelTerminalCommand'
+        });
+        proposalDiv.className = 'hidden';
+      });
+    }
+
+    function updateMemoryStats(stats) {
+      const statsDiv = document.getElementById('memoryStats');
+      statsDiv.className = '';
+      statsDiv.innerHTML = \`
+        <div class="memory-stats">
+          <h3>🧠 Knowledge Base Stats</h3>
+          <div class="memory-stat-item">
+            <span>Total Chunks:</span>
+            <span>\${stats.totalEntries}</span>
+          </div>
+          <div class="memory-stat-item">
+            <span>Store Status:</span>
+            <span>\${stats.storePathExists ? '✅ Active' : '❌ Missing'}</span>
+          </div>
+          <div class="memory-stat-item">
+            <span>Last Flush:</span>
+            <span>\${new Date(stats.lastFlushMs).toLocaleTimeString()}</span>
+          </div>
+        </div>
+      \`;
+    }
+
     function clearChat() {
+
       chatContainer.innerHTML = \`
         <div class="message system">
           <div class="message-content">

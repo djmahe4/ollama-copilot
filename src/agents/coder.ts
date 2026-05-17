@@ -7,7 +7,7 @@ import { CoderOutput, OllamaMessage, PlannerOutput, FileContext } from '../proto
 import { CODER_SYSTEM_PROMPT, buildCoderPrompt } from '../protocol/prompts';
 import { WorkspaceTool } from '../tools/workspace';
 import { SearchTool } from '../tools/search';
-import { parseJsonObject } from './jsonParser';
+import { parseJsonObject, parseAndRetryJson } from './jsonParser';
 
 export class CoderAgent {
   private ollama: OllamaClient;
@@ -44,30 +44,12 @@ export class CoderAgent {
 
       onProgress?.('Generating code changes...');
 
-      let response = await this.ollama.chat(messages, {
-        temperature: 0.1,
-        num_predict: 4000
-      });
-
-      // Parse JSON response
-      let coderOutput = parseJsonObject<CoderOutput>(response);
-
-      if (!coderOutput) {
-        onProgress?.('Retrying JSON parsing...');
-        
-        messages.push({ role: 'assistant', content: response });
-        messages.push({ 
-          role: 'user', 
-          content: 'The JSON is invalid. Please output ONLY valid JSON with no markdown or extra text.' 
-        });
-
-        response = await this.ollama.chat(messages);
-        coderOutput = parseJsonObject<CoderOutput>(response);
-      }
-
-      if (!coderOutput) {
-        throw new Error('Failed to get valid JSON response from coder');
-      }
+      const coderOutput = await parseAndRetryJson<CoderOutput>(
+        this.ollama,
+        messages,
+        { temperature: 0.1, num_predict: 4000 },
+        (msg: string) => onProgress?.(msg)
+      );
 
       // Validate structure
       if (!this.isValidCoderOutput(coderOutput)) {

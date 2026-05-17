@@ -1,21 +1,21 @@
 {
-  "name": "ollama-ai-copilot",
-  "displayName": "Ollama AI Copilot",
-  "description": "Agentic AI coding assistant powered by local Ollama models with multi-mode support",
-  "version": "1.1.1",
-  "publisher": "anandof28",
+  "name": "llama-a-coder",
+  "displayName": "Llama A Coder",
+  "description": "Production-grade agentic AI coding assistant powered by local Ollama models with MCP server support",
+  "version": "1.2.0",
+  "publisher": "djmahe4",
   "author": {
-    "name": "Anand"
+    "name": "djmahe4"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anandof28/ollama-copilot.git"
+    "url": "https://github.com/djmahe4/ollama-copilot.git"
   },
   "bugs": {
-    "url": "https://github.com/anandof28/ollama-copilot/issues"
+    "url": "https://github.com/djmahe4/ollama-copilot/issues"
   },
-  "homepage": "https://github.com/anandof28/ollama-copilot#readme",
+  "homepage": "https://github.com/djmahe4/ollama-copilot#readme",
   "keywords": [
     "ai",
     "ollama",
@@ -46,25 +46,70 @@
     "commands": [
       {
         "command": "ollama-copilot.openPanel",
-        "title": "Open Ollama Copilot",
-        "category": "Ollama Copilot"
+        "title": "Open Llama A Coder",
+        "category": "Llama A Coder"
       },
       {
         "command": "ollama-copilot.implementFeature",
         "title": "Implement Feature",
-        "category": "Ollama Copilot"
+        "category": "Llama A Coder"
       },
       {
         "command": "ollama-copilot.selectModel",
         "title": "Select Model",
-        "category": "Ollama Copilot"
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.switchModel",
+        "title": "Switch Model (Hot-swap)",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.generatePlan",
+        "title": "Generate Agentic Plan",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.executeTask",
+        "title": "Execute Agentic Task",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.applyPatch",
+        "title": "Apply Patch",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.reviewChanges",
+        "title": "Review Changes",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.manageMcpServers",
+        "title": "Manage MCP Servers",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.codeAction.fix",
+        "title": "Fix with Llama A Coder",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.codeAction.refactor",
+        "title": "Refactor with Llama A Coder",
+        "category": "Llama A Coder"
+      },
+      {
+        "command": "llama-a-coder.codeAction.explain",
+        "title": "Explain with Llama A Coder",
+        "category": "Llama A Coder"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "ollama-copilot",
-          "title": "Ollama Copilot",
+          "title": "Llama A Coder",
           "icon": "resources/icon.svg"
         }
       ]
@@ -79,7 +124,7 @@
       ]
     },
     "configuration": {
-      "title": "Ollama Copilot",
+      "title": "Llama A Coder",
       "properties": {
         "ollamaCopilot.apiUrl": {
           "type": "string",
@@ -115,6 +160,62 @@
             "pytest"
           ],
           "description": "Allowed terminal commands for security"
+        },
+        "llamaACoder.embeddingModel": {
+          "type": "string",
+          "default": "nomic-embed-text",
+          "description": "Ollama model used to generate embeddings for the memory store. Must support /api/embeddings (e.g. nomic-embed-text, mxbai-embed-large). Falls back to feature-hashing when not available."
+        },
+        "llamaACoder.mcpServers": {
+          "type": "array",
+          "default": [],
+          "description": "List of Model Context Protocol (MCP) server configurations",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name for this MCP server"
+              },
+              "url": {
+                "type": "string",
+                "description": "MCP server URL (http/https for SSE transport, or path for stdio)"
+              },
+              "transport": {
+                "type": "string",
+                "enum": [
+                  "sse",
+                  "stdio"
+                ],
+                "default": "sse",
+                "description": "Transport protocol for this MCP server"
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this MCP server is active"
+              }
+            },
+            "required": [
+              "name",
+              "url"
+            ]
+          }
+        },
+        "llamaACoder.mcpAutoDiscover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically discover and register known MCP servers (e.g. Context7) on activation"
+        },
+        "llamaACoder.mcpPreferContext7": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer Context7 MCP for real-time documentation lookups when available"
+        },
+        "ollamaCopilot.debugMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable advanced debugging: logs terminal output to files, indexes logs into memory, and enables surgical reading (head/tail/grep)"
         }
       }
     }
@@ -124,16 +225,20 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
+    "test": "jest",
     "lint": "eslint src --ext ts",
     "package": "vsce package --allow-missing-repository"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.75.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/vsce": "^3.7.1",
     "eslint": "^10.0.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.9",
     "typescript": "^5.0.0"
   }
 }

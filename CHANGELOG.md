@@ -1,9 +1,42 @@
 # Changelog
 
-All notable changes to the "ollama-copilot" extension will be documented in this file.
+All notable changes to the "Llama A Coder" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.2.0] - 2026-04-16
+
+### Fork Bootstrap – PHASE 0 (DELTA TYPE: MODIFY / EXTEND)
+
+#### Added
+- **Extension rebrand**: displayName → "Llama A Coder", publisher → djmahe4, id → djmahe4.llama-A-coder
+- **MCP Client stub** (`src/utils/mcp-client.ts`): `McpClientManager` with server registration, auto-discovery, reachability probing, Context7 auto-detection, and safe validated tool-call dispatch (SSE transport)
+- **MCP configuration settings**:
+  - `llamaACoder.mcpServers` – user-managed list of MCP server configs (name, url, transport, enabled)
+  - `llamaACoder.mcpAutoDiscover` – auto-detect well-known MCP servers on activation (default: true)
+  - `llamaACoder.mcpPreferContext7` – prefer Context7 for documentation lookups (default: true)
+- **New commands** (all under "Llama A Coder" category):
+  - `llama-a-coder.switchModel` – hot-swap Ollama model without reload
+  - `llama-a-coder.generatePlan` – trigger Plan Mode from the command palette
+  - `llama-a-coder.executeTask` – trigger Code Mode from the command palette
+  - `llama-a-coder.applyPatch` – shortcut to apply staged patches
+  - `llama-a-coder.reviewChanges` – open diff review for staged patches
+  - `llama-a-coder.manageMcpServers` – QuickPick view of registered MCP servers
+- **Graceful MCP deactivation**: `McpClientManager.dispose()` called via `context.subscriptions`
+
+#### Changed
+- Activity bar container title: "Ollama Copilot" → "Llama A Coder"
+- Configuration section title: "Ollama Copilot" → "Llama A Coder"
+- Activation/deactivation log messages updated to "Llama A Coder"
+- Ready notification emoji updated to 🦙
+
+#### Preserved (upstream compatibility)
+- All upstream command IDs (`ollama-copilot.*`) remain registered unchanged
+- Full multi-agent system (Planner, Coder, Tester agents) untouched
+- Sidebar chat view type and provider unchanged
+- Patch, search, terminal, workspace tools untouched
+- Model selector, streaming, and session state logic untouched
 
 ## [1.1.1] - 2026-02-22
 

@@ -1,26 +1,53 @@
 /**
- * Ollama Copilot Extension - Main Entry Point
- * 
- * An agentic coding assistant powered by local Ollama models
+ * Llama A Coder Extension – Main Entry Point
+ *
+ * Production-grade agentic coding assistant powered by local Ollama models.
+ * Fork of ollama-copilot (anandof28) – evolved with full agentic-core,
+ * MCP server support, optimization engine, and enhanced command surface.
+ *
+ * DELTA TYPE: MODIFY (all upstream logic preserved; new modules wired in)
  */
 
 import * as vscode from 'vscode';
-import { OllamaClient } from './ollama/client';
-import { ModelSelector } from './ollama/modelSelector';
-import { PlannerAgent } from './agents/planner';
-import { CoderAgent } from './agents/coder';
-import { TesterAgent } from './agents/tester';
-import { WorkspaceTool } from './tools/workspace';
-import { SearchTool } from './tools/search';
-import { PatchTool } from './tools/patch';
-import { TerminalTool } from './tools/terminal';
-import { ChatViewProvider } from './ui/chatView';
-import { SessionState } from './protocol/types';
+
+// Upstream modules (preserved unchanged)
+import { OllamaClient }      from './ollama/client';
+import { ModelSelector }     from './ollama/modelSelector';
+import { PlannerAgent }      from './agents/planner';
+import { CoderAgent }        from './agents/coder';
+import { TesterAgent }       from './agents/tester';
+import { WorkspaceTool }     from './tools/workspace';
+import { SearchTool }        from './tools/search';
+import { PatchTool }         from './tools/patch';
+import { TerminalTool }      from './tools/terminal';
+import { ChatViewProvider }  from './ui/chatView';
+import { SessionState }      from './protocol/types';
+import { DebugLogger }       from './utils/debug-logger';
+
+// New modules
+import { McpClientManager }  from './utils/mcp-client';
+import { MemoryManager }     from './utils/memory-manager';
+import { ConversationManager } from './utils/conversation-manager';
+import { ModelManager }      from './ollama/model-manager';
+import { PlanManager }       from './agentic-core/plan-manager';
+import { SkillManager }      from './agentic-core/skill-manager';
+import { TaskOrchestrator }  from './agentic-core/task-orchestrator';
+import { StatusBarManager }  from './ui/status-bar';
+import { SidebarProvider }   from './ui/sidebar-provider';
+import { CompletionProvider }          from './providers/completion-provider';
+import { CodeActionProvider, registerCodeActionCommands } from './providers/code-action-provider';
+import { registerSwitchModel }   from './commands/switch-model';
+import { registerGeneratePlan }  from './commands/generate-plan';
+import { registerExecuteTask }   from './commands/execute-task';
+import { registerApplyPatch }    from './commands/apply-patch';
+import { registerReviewChanges } from './commands/review-changes';
+import { Patch } from './protocol/types';
 
 /**
  * Main extension controller
  */
 export class OllamaCopilotExtension {
+  // Upstream fields (unchanged)
   private ollama: OllamaClient;
   private modelSelector: ModelSelector;
   private planner: PlannerAgent;
@@ -34,6 +61,19 @@ export class OllamaCopilotExtension {
   private session: SessionState;
   private currentMode: 'code' | 'plan' | 'ask' = 'code';
 
+  // New fields
+  private mcpClient: McpClientManager;
+  public memory: MemoryManager;
+  private conversation: ConversationManager;
+  private modelManager: ModelManager;
+  private planManager: PlanManager;
+  private orchestrator: TaskOrchestrator;
+  private skillManager: SkillManager;
+  private statusBar: StatusBarManager;
+  private sidebarProvider: SidebarProvider;
+  /** Patches staged by the orchestrator and awaiting apply. */
+  private pendingPatches: Patch[] = [];
+
   constructor(context: vscode.ExtensionContext) {
     // Get configuration
     const config = vscode.workspace.getConfiguration('ollamaCopilot');
@@ -46,13 +86,13 @@ export class OllamaCopilotExtension {
       'pnpm test',
       'pytest'
     ];
-
-    // Initialize components
-    this.ollama = new OllamaClient(apiUrl, model);
+    const debugMode = config.get<boolean>('debugMode') ?? false;
     this.workspace = new WorkspaceTool();
+    const logger = new DebugLogger(this.workspace.getWorkspaceRoot());
+    this.ollama = new OllamaClient(apiUrl, model);
     this.search = new SearchTool();
     this.patch = new PatchTool(this.workspace);
-    this.terminal = new TerminalTool(allowedCommands, this.workspace.getWorkspaceRoot());
+    this.terminal = new TerminalTool(allowedCommands, this.workspace.getWorkspaceRoot(), logger, debugMode);
 
     // Initialize agents
     this.planner = new PlannerAgent(this.ollama, this.workspace);
@@ -64,6 +104,34 @@ export class OllamaCopilotExtension {
 
     // Initialize model selector
     this.modelSelector = new ModelSelector();
+
+    // Initialize MCP client manager
+    this.mcpClient = new McpClientManager(context);
+    
+    // Initialize memory manager and start async load (non-blocking)
+    this.memory = new MemoryManager(context);
+    this.memory.initialize().catch(err =>
+      console.error('[extension] MemoryManager init error:', err)
+    );
+
+    this.conversation = new ConversationManager(this.ollama);
+    
+    // Initialize new agentic-core modules
+    const cfg2 = vscode.workspace.getConfiguration('ollamaCopilot');
+    const apiUrl2 = cfg2.get<string>('apiUrl') ?? 'http://localhost:11434';
+    this.modelManager  = new ModelManager(apiUrl2);
+    this.planManager     = new PlanManager(this.ollama, this.workspace);
+    this.skillManager    = new SkillManager(this.memory, this.workspace.getWorkspaceRoot());
+    this.orchestrator    = new TaskOrchestrator(
+      this.ollama, this.planManager, this.workspace, this.patch, this.terminal, this.skillManager, this.mcpClient, this.memory, this.conversation
+    );
+    this.statusBar     = new StatusBarManager(context);
+    this.sidebarProvider = new SidebarProvider(context, this.chatView, this.statusBar);
+
+    // Dynamic Tool Discovery
+    this.discoverEnvironmentCapabilities().catch(err => 
+      console.error('[extension] Tool discovery error:', err)
+    );
 
     // Initialize session state
     this.session = {
@@ -80,6 +148,11 @@ export class OllamaCopilotExtension {
 
     // Initialize models in chat view
     this.refreshModels();
+
+    // Initialize MCP servers asynchronously (non-blocking)
+    this.mcpClient.initialize().catch(err => {
+      console.error('[Llama A Coder] MCP initialization error:', err);
+    });
 
     // Listen for configuration changes
     context.subscriptions.push(
@@ -103,6 +176,66 @@ export class OllamaCopilotExtension {
    */
   public getChatView(): ChatViewProvider {
     return this.chatView;
+  }
+
+  /**
+   * Update memory statistics in the UI
+   */
+  public updateMemoryStats(): void {
+    const stats = this.memory.getStats();
+    this.chatView.postMessage({
+      command: 'updateMemoryStats',
+      stats
+    });
+  }
+
+  /**
+   * Get the MCP client manager
+   */
+  public getMcpClient(): McpClientManager {
+    return this.mcpClient;
+  }
+
+  public getModelManager(): ModelManager   { return this.modelManager; }
+  public getPlanManager(): PlanManager     { return this.planManager; }
+  public getOrchestrator(): TaskOrchestrator { return this.orchestrator; }
+  public getStatusBar(): StatusBarManager  { return this.statusBar; }
+  public getPendingPatches(): readonly Patch[] { return this.pendingPatches; }
+
+  /**
+   * Scans the environment for installed tools and stores them in memory.
+   */
+  private async discoverEnvironmentCapabilities(): Promise<void> {
+    const commonTools = {
+      universal: ['git', 'node', 'npm', 'pnpm', 'python', 'pip', 'pytest'],
+      unix: ['rg', 'grep', 'find', 'fd', 'sed', 'awk'],
+      win32: ['powershell', 'cmd', 'findstr']
+    };
+
+    const toolsToScan = [
+      ...commonTools.universal,
+      ...(this.terminal.osType === 'win32' ? commonTools.win32 : commonTools.unix)
+    ];
+
+    this.chatView.addMessage('system', '🔍 Discovering workspace capabilities...');
+    
+    for (const tool of toolsToScan) {
+      const version = await this.terminal.checkToolExists(tool);
+      if (version) {
+        await this.memory.storeCapability(tool, version);
+      }
+    }
+    this.chatView.addMessage('system', '✓ Environment capabilities indexed in LTM.');
+  }
+
+  /**
+   * Dispose extension resources (called on deactivation)
+   */
+  public dispose(): void {
+    this.mcpClient.dispose();
+    this.memory.dispose();
+    this.sidebarProvider.dispose();
+    this.terminal.dispose();
   }
 
   /**
@@ -131,43 +264,46 @@ export class OllamaCopilotExtension {
    */
   private async handleMessage(message: any): Promise<void> {
     try {
+      // Record user messages in conversation history
+      if (['implementFeature', 'planFeature', 'askQuestion'].includes(message.command)) {
+        this.conversation.addMessage('user', message.request);
+      }
+
       switch (message.command) {
         case 'implementFeature':
           this.currentMode = 'code';
           await this.implementFeature(message.request);
           break;
-
         case 'planFeature':
           this.currentMode = 'plan';
           await this.planFeature(message.request);
           break;
-
         case 'askQuestion':
           this.currentMode = 'ask';
           await this.askQuestion(message.request);
           break;
-
         case 'selectModel':
           await this.changeModel(message.model);
           break;
-
         case 'requestModels':
           await this.refreshModels();
           break;
-
         case 'stopProcessing':
           this.chatView.stopProcessing();
           this.chatView.addMessage('system', '⏹ Operation stopped by user');
           break;
-
         case 'applyPatches':
           await this.applyPatches();
           break;
-
         case 'runTests':
           await this.runTests();
           break;
-
+        case 'executeTerminalCommand':
+          await this.handleTerminalExecution(message.command);
+          break;
+        case 'cancelTerminalCommand':
+          this.chatView.addMessage('system', '❌ Command execution cancelled by user.');
+          break;
         case 'clearSession':
           this.clearSession();
           break;
@@ -178,13 +314,21 @@ export class OllamaCopilotExtension {
     }
   }
 
+
   /**
    * Change the current model
    */
   private async changeModel(modelName: string): Promise<void> {
+    // Generate handover packet before switching
+    const handover = this.conversation.getHandoverPacket();
+    
     this.ollama.setModel(modelName);
     const config = vscode.workspace.getConfiguration('ollamaCopilot');
     await config.update('model', modelName, vscode.ConfigurationTarget.Global);
+    
+    // Inject handover as the first message for the new model
+    this.conversation.addMessage('system', `Model Transition: ${handover}`);
+    
     this.chatView.addMessage('system', `✓ Switched to model: ${modelName}`);
     this.modelSelector.updateStatusBar();
   }
@@ -196,6 +340,8 @@ export class OllamaCopilotExtension {
     const cancelToken = this.chatView.startProcessing();
     
     try {
+      await this.conversation.compact();
+      
       // Check if workspace is open
       if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
         this.chatView.addMessage('error', '⚠️ Please open a workspace folder to use Ollama Copilot features.');
@@ -382,6 +528,29 @@ export class OllamaCopilotExtension {
       appliedPatches: [],
       testResults: null
     };
+    this.conversation.clear();
+  }
+
+  /**
+   * Executes a terminal command that has been explicitly approved by the user.
+   */
+  private async handleTerminalExecution(command: string): Promise<void> {
+    try {
+      this.chatView.updateProgress(`Executing: ${command}...`);
+      
+      // Use force=true to bypass the whitelist since the user manually approved/edited it
+      const result = await this.terminal.runCommand(command, true);
+      
+      if (result.success) {
+        this.chatView.addMessage('assistant', `✓ Command executed successfully:\n\n\`\`\`\n${result.data?.stdout}\n\`\`\``);
+      } else {
+        this.chatView.addMessage('error', `✗ Command failed:\n\n${result.error}\n\nOutput:\n\`\`\`\n${result.data?.stdout || result.data?.stderr || ''}\n\`\`\``);
+      }
+    } catch (error) {
+      this.chatView.addMessage('error', `Unexpected error during terminal execution: ${error}`);
+    } finally {
+      this.chatView.stopProcessing();
+    }
   }
 
   /**
@@ -391,6 +560,8 @@ export class OllamaCopilotExtension {
     const cancelToken = this.chatView.startProcessing();
     
     try {
+      await this.conversation.compact();
+      
       if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
         this.chatView.addMessage('error', '⚠️ Please open a workspace folder to use planning features.');
         return;
@@ -438,6 +609,8 @@ export class OllamaCopilotExtension {
     const cancelToken = this.chatView.startProcessing();
     
     try {
+      await this.conversation.compact();
+      
       this.chatView.addMessage('user', userRequest);
       
       // Gather workspace context if available
@@ -487,19 +660,23 @@ export class OllamaCopilotExtension {
 
       this.chatView.updateProgress('Generating answer...');
 
-      // Chat with full context
-      const response = await this.ollama.chat([
-        {
-          role: 'system',
-          content: `You are an expert coding assistant analyzing this codebase. Answer questions clearly and concisely based on the provided workspace context. Reference specific files and code when relevant.
+      // Chat with full context from ConversationManager
+      const history = this.conversation.getModelReadyHistory();
+      
+      // Append the specific workspace context for this question
+       const finalMessages = [
+         ...history,
+         {
+           role: 'system' as const,
+           content: `WORKSPACE CONTEXT FOR THIS QUERY:\n${contextMessage}`
+         },
+         {
+           role: 'user' as const,
+           content: userRequest
+         }
+       ];
 
-${contextMessage}`
-        },
-        {
-          role: 'user',
-          content: userRequest
-        }
-      ]);
+      const response = await this.ollama.chat(finalMessages);
 
       if (cancelToken.token.isCancellationRequested) {
         return;
@@ -540,7 +717,7 @@ ${contextMessage}`
  * Extension activation
  */
 export function activate(context: vscode.ExtensionContext) {
-  console.log('Ollama Copilot extension is activating...');
+  console.log('Llama A Coder extension is activating...');
 
   try {
     // Create extension instance (workspace check will be done when needed)
@@ -554,17 +731,17 @@ export function activate(context: vscode.ExtensionContext) {
       )
     );
 
-    // Register commands
+    // -----------------------------------------------------------------------
+    // Upstream commands (preserved for backward compatibility)
+    // -----------------------------------------------------------------------
     context.subscriptions.push(
       vscode.commands.registerCommand('ollama-copilot.openPanel', () => {
-        // Focus on the chat view
         vscode.commands.executeCommand('ollama-copilot.chatView.focus');
       })
     );
 
     context.subscriptions.push(
       vscode.commands.registerCommand('ollama-copilot.implementFeature', () => {
-        // Focus on the chat view
         vscode.commands.executeCommand('ollama-copilot.chatView.focus');
       })
     );
@@ -575,16 +752,192 @@ export function activate(context: vscode.ExtensionContext) {
       })
     );
 
-    console.log('Ollama Copilot extension activated successfully!');
+    // -----------------------------------------------------------------------
+    // New Llama A Coder commands
+    // -----------------------------------------------------------------------
+
+    /** Hot-swap model without full extension reload */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.switchModel', async () => {
+        await extension.showModelSelector();
+      })
+    );
+
+    /** Trigger Plan Mode: generate a hierarchical implementation plan */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.generatePlan', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '📋 Switch to **Plan** mode in the chat and describe what you want to build.'
+        );
+      })
+    );
+
+    /** Trigger Code Mode: execute the full plan → generate → patch workflow */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.executeTask', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '💻 Switch to **Code** mode in the chat and describe the feature to implement.'
+        );
+      })
+    );
+
+    /** Apply staged patches from the last code-generation run */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.applyPatch', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '🔧 Use the **Apply Patches** button in the chat to apply pending changes.'
+        );
+      })
+    );
+
+    /** Open diff review for staged patches */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.reviewChanges', () => {
+        vscode.commands.executeCommand('ollama-copilot.chatView.focus');
+        extension.getChatView().addMessage(
+          'system',
+          '🔍 Review the diff preview above before applying patches.'
+        );
+      })
+    );
+
+    /** Manage MCP server list */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.manageMcpServers', async () => {
+        const servers = extension.getMcpClient().getRegisteredServers();
+        if (servers.length === 0) {
+          const action = await vscode.window.showInformationMessage(
+            'No MCP servers are registered. Open settings to add one.',
+            'Open Settings'
+          );
+          if (action === 'Open Settings') {
+            vscode.commands.executeCommand(
+              'workbench.action.openSettings',
+              'llamaACoder.mcpServers'
+            );
+          }
+          return;
+        }
+
+        const items = servers.map(s => ({
+          label: s.name,
+          description: s.enabled ? '$(check) enabled' : '$(circle-slash) disabled',
+          detail: `${(s.transport ?? 'sse').toUpperCase()} – ${s.url}`
+        }));
+
+        await vscode.window.showQuickPick(items, {
+          title: 'Registered MCP Servers',
+          placeHolder: 'Select a server to view details'
+        });
+      })
+    );
+
+    /**
+     * Trigger full workspace indexing (Knowledge Compilation)
+     */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.indexWorkspace', async () => {
+        const debugMode = await vscode.window.showInformationMessage(
+          'Run in Debug Mode? (Overwrites .gitignore and scans all matching files)',
+          'Yes', 'No', 'Cancel'
+        );
+        
+        if (debugMode === 'Cancel') {
+          return;
+        }
+
+        const isDebug = debugMode === 'Yes';
+        vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: '🦙 Compiling Knowledge Base...'
+        }, async (progress) => {
+          progress.report({ message: 'Scanning workspace and computing embeddings...' });
+          const result = await extension.memory.indexWorkspaceFull(isDebug);
+          
+          vscode.window.showInformationMessage(
+            `Knowledge compilation complete! Indexed ${result.indexed} chunks with ${result.errors} errors.`
+          );
+        });
+      })
+    );
+
+    /**
+     * Memory Health Check & Pruning
+     */
+    context.subscriptions.push(
+      vscode.commands.registerCommand('llama-a-coder.lintMemory', async () => {
+        vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: '🧹 Linting Knowledge Base...'
+        }, async (progress) => {
+          const report = await extension.memory.lintMemory();
+          const totalIssues = report.orphans.length + report.contradictions.length + report.outdated.length;
+          
+          if (totalIssues === 0) {
+            vscode.window.showInformationMessage('✨ Knowledge base is healthy! No issues found.');
+            return;
+          }
+          
+          // Update stats UI to reflect current state
+          extension.updateMemoryStats();
+
+          const msg = `Found ${totalIssues} issues:
+- Orphans: ${report.orphans.length}
+- Contradictions: ${report.contradictions.length}
+- Outdated: ${report.outdated.length}
+LTM index may be stale.
+ 
+Would you like to prune these entries?`;
+
+
+          const confirm = await vscode.window.showWarningMessage(msg, 'Prune Now', 'Ignore');
+          
+          if (confirm === 'Prune Now') {
+            const allIds = [
+              ...report.orphans, 
+              ...report.outdated, 
+              ...report.contradictions.flat()
+            ];
+            await extension.memory.pruneMemory(allIds);
+            vscode.window.showInformationMessage(`Successfully pruned ${allIds.length} problematic entries.`);
+          }
+        });
+      })
+    );
+    context.subscriptions.push(
+      registerSwitchModel(context, extension.getModelManager(), extension.getStatusBar()),
+      registerGeneratePlan(context, extension.getPlanManager(), extension.getChatView(), extension.getStatusBar()),
+      registerExecuteTask(context, extension.getOrchestrator(), extension.getChatView(), extension.getStatusBar()),
+      registerApplyPatch(context, extension.getChatView(), extension.getStatusBar(), () => extension.getPendingPatches()),
+      registerReviewChanges(context, extension.getChatView(), extension.getStatusBar(), () => extension.getPendingPatches()),
+      ...registerCodeActionCommands(context)
+    );
+
+    // -----------------------------------------------------------------------
+    // Providers (lazy completion + code actions)
+    // -----------------------------------------------------------------------
+    CompletionProvider.registerLazy(context);
+    CodeActionProvider.register(context);
+
+    // Dispose MCP resources when the extension is deactivated
+    context.subscriptions.push({ dispose: () => extension.dispose() });
+
+    console.log('Llama A Coder extension activated successfully!');
 
     vscode.window.showInformationMessage(
-      '🤖 Ollama Copilot is ready! Open the sidebar to get started.'
+      '🦙 Llama A Coder is ready! Open the sidebar to get started.'
     );
 
   } catch (error) {
-    console.error('Failed to activate Ollama Copilot:', error);
+    console.error('Failed to activate Llama A Coder:', error);
     vscode.window.showErrorMessage(
-      `Failed to activate Ollama Copilot: ${error}`
+      `Failed to activate Llama A Coder: ${error}`
     );
   }
 }
@@ -593,5 +946,5 @@ export function activate(context: vscode.ExtensionContext) {
  * Extension deactivation
  */
 export function deactivate() {
-  console.log('Ollama Copilot extension deactivated');
+  console.log('Llama A Coder extension deactivated');
 }

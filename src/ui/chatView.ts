@@ -632,6 +632,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button class="mode-btn" data-mode="ask" title="Ask Mode: Simple Q&A without code changes">
         💬 Ask
       </button>
+      <button class="mode-btn" data-mode="plan" title="Plan Mode: Create implementation plans only">
+        📋 Plan
+      </button>
+      <button class="mode-btn" data-mode="ask" title="Ask Mode: Simple Q&A without code changes">
+        💬 Ask
+      </button>
     </div>
     <div class="model-selector-container">
       <label class="model-label">Model</label>
@@ -837,67 +843,71 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         error: 'Error'
       };
 
-      messageDiv.innerHTML = \`
-        <div class="message-header">
-          <span class="message-icon">\${icons[type] || '💬'}</span>
-          <span>\${labels[type] || type}</span>
-          <span style="margin-left: auto; font-size: 10px;">\${formatTime(timestamp)}</span>
-        </div>
-        <div class="message-content">\${renderMessageContent(content)}</div>
-      \`;
+       messageDiv.innerHTML = \`
+         <div class="message-header">
+           <span class="message-icon">\${icons[type] || '💬'}</span>
+           <span>\${labels[type] || type}</span>
+           <span style="margin-left: auto; font-size: 10px;">\${formatTime(timestamp)}</span>
+         </div>
+         <div class="message-content">\${renderMessageContent(content)}</div>
+       \`;
 
       chatContainer.appendChild(messageDiv);
       chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 
     function updateProgress(message) {
-      // Remove previous progress
-      const oldProgress = chatContainer.querySelector('.progress');
-      if (oldProgress) {
-        oldProgress.remove();
+      const progressDiv = chatContainer.querySelector('.progress');
+      
+      if (!message) {
+        if (progressDiv) progressDiv.remove();
+        return;
       }
 
-      if (!message) return;
-
-      const progressDiv = document.createElement('div');
-      progressDiv.className = 'progress';
-      progressDiv.innerHTML = \`
-        <div class="spinner"></div>
-        <span>\${escapeHtml(message)}</span>
-      \`;
-
-      chatContainer.appendChild(progressDiv);
+      if (progressDiv) {
+        const textSpan = progressDiv.querySelector('span');
+        if (textSpan) {
+          textSpan.textContent = message;
+        }
+      } else {
+        const newProgressDiv = document.createElement('div');
+        newProgressDiv.className = 'progress';
+        newProgressDiv.innerHTML = \`
+          <div class="spinner"></div>
+          <span>\${escapeHtml(message)}</span>
+        \`;
+        chatContainer.appendChild(newProgressDiv);
+      }
       chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 
     function showDiffPreview(patches) {
       updateProgress('');
-
+ 
       const diffDiv = document.createElement('div');
       diffDiv.className = 'diff-preview';
-
+ 
       let diffHtml = '<h4 style="margin-bottom: 8px;">📝 Proposed Changes:</h4>';
-
+ 
       patches.forEach(patch => {
+        const lines = patch.diff.split('\n');
         diffHtml += \`
           <div class="diff-file">
-            <div class="diff-file-name">\${escapeHtml(patch.file)}</div>
-            \${patch.hunks.map(hunk => 
-              hunk.lines.map(line => {
-                const className = line.startsWith('+') ? 'diff-add' : 
-                                line.startsWith('-') ? 'diff-remove' : '';
-                return \`<div class="diff-line \${className}">\${escapeHtml(line)}</div>\`;
-              }).join('')
-            ).join('')}
+            <div class="diff-file-name">\${escapeHtml(patch.path)}</div>
+            \${lines.map(line => {
+              const className = line.startsWith('+') && !line.startsWith('+++') ? 'diff-add' : 
+                                line.startsWith('-') && !line.startsWith('---') ? 'diff-remove' : '';
+              return \`<div class="diff-line \${className}">\${escapeHtml(line)}</div>\`;
+            }).join('')}
           </div>
         \`;
       });
-
+ 
       diffDiv.innerHTML = diffHtml;
       chatContainer.appendChild(diffDiv);
       chatContainer.scrollTop = chatContainer.scrollHeight;
     }
-
+ 
     function clearChat() {
       chatContainer.innerHTML = \`
         <div class="empty-state">
@@ -910,8 +920,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </div>
       \`;
     }
-
+ 
     function restoreHistory(history) {
+
       // Remove empty state
       const emptyState = chatContainer.querySelector('.empty-state');
       if (emptyState) {
@@ -925,9 +936,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     function updateModelSelector(models, currentModel) {
-      modelSelect.innerHTML = models.map(model => 
-        \`<option value="\${model}" \${model === currentModel ? 'selected' : ''}>\${model}</option>\`
-      ).join('');
+       modelSelect.innerHTML = models.map(model => 
+         \`<option value="\${model}" \${model === currentModel ? 'selected' : ''}>\${model}</option>\`
+       ).join('');
     }
 
     function formatTime(timestamp) {
