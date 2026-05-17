@@ -127,7 +127,39 @@ export async function loadGitignoreRules(workspaceRoot: string): Promise<Gitigno
   await collectFrom(path.join(workspaceRoot, '.gitignore'), '');
 
   // Nested .gitignore files one level deep
+export async function loadGitignoreRules(workspaceRoot: string): Promise<GitignoreRules> {
+  const rawPatterns: string[] = [];
+
+  const collectFrom = async (filePath: string, prefix: string): Promise<void> => {
+    try {
+      const content = await fs.promises.readFile(filePath, 'utf8');
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#') || line.startsWith('!')) { continue; }
+        rawPatterns.push(prefix ? `${prefix}/${line}` : line);
+      }
+    } catch { /* file not found or unreadable – skip */ }
+  };
+
+  await collectFrom(path.join(workspaceRoot, '.gitignore'), '');
+
   try {
+    const entries = await fs.promises.readdir(workspaceRoot);
+    for (const entry of entries) {
+      if (ALWAYS_EXCLUDED.has(entry)) { continue; }
+      const sub = path.join(workspaceRoot, entry);
+      try {
+        const stat = await fs.promises.stat(sub);
+        if (stat.isDirectory()) {
+          await collectFrom(path.join(sub, '.gitignore'), entry);
+        }
+      } catch { /* stat failed – skip */ }
+    }
+  } catch { /* readdir failed – skip */ }
+
+  const compiled = rawPatterns.map(p => compilePattern(p));
+  return { patterns: rawPatterns, compiled };
+}
     const entries = await fs.promises.readdir(workspaceRoot);
     for (const entry of entries) {
       if (ALWAYS_EXCLUDED.has(entry)) { continue; }
